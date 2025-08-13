@@ -2,15 +2,15 @@ from __future__ import annotations
 
 # ruff: noqa: T201 `print` found
 import argparse
-import itertools
 import os
 import shutil
 import sys
-from pathlib import Path
 
 import torch
 from PIL import Image
 from torchvision.models import EfficientNet_V2_S_Weights, efficientnet_v2_s
+
+from trailcam_classifier.util import find_images
 
 
 def load_classifier(model_path: str, class_names_path: str):
@@ -63,26 +63,6 @@ def predict_image(image_path: str, model, device, transform):
     return predicted_idx, confidence
 
 
-def _find_sources(input_dirs: list[str], output_dir: str) -> set[str]:
-    input_dirs = [Path(os.path.expanduser(input_dir)) for input_dir in input_dirs]
-
-    combined_results = itertools.chain.from_iterable(base_path.rglob("*.*") for base_path in input_dirs)
-    all_files = set(combined_results)
-
-    output_path = Path(output_dir)
-
-    def keep_file(filename: Path) -> bool:
-        if filename.is_relative_to(output_path):
-            return False
-
-        if not filename.is_file():
-            return False
-
-        return filename.suffix[1:].lower() in {"jpg", "jpeg"}
-
-    return {filename for filename in all_files if keep_file(filename)}
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="A utility to automatically classify JPG images based on their contents.",
@@ -119,7 +99,7 @@ def main():
     for name in class_names:
         os.makedirs(os.path.join(output_root, name), exist_ok=True)
 
-    image_paths = _find_sources(args.dirs, args.output)
+    image_paths = find_images(args.dirs, args.output)
     if not image_paths:
         print("No images found to classify.")
         return 0

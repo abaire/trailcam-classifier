@@ -3,14 +3,22 @@ from __future__ import annotations
 # ruff: noqa: T201 `print` found
 import argparse
 import os
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import torch
+from PIL import Image
 from sklearn.metrics import accuracy_score, classification_report
 from torch import device, nn, optim
-from torch.utils.data import DataLoader, Subset, random_split
+from torch.utils.data import DataLoader, Dataset, Subset, random_split
 from torch_lr_finder import LRFinder
-from torchvision.datasets import ImageFolder
 from torchvision.models import EfficientNet, EfficientNet_V2_S_Weights, efficientnet_v2_s
+from tqdm import tqdm
+
+from trailcam_classifier.util import find_images
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 weights = EfficientNet_V2_S_Weights.DEFAULT
 data_transform = weights.transforms()
@@ -18,43 +26,89 @@ data_transform = weights.transforms()
 MODEL_SAVE_FILENAME = "trailcam_classifier_model.pth"
 
 
-def get_deterministic_split(dataset: ImageFolder, val_split_ratio: float, artifact_path: str = "validation_set.txt"):
-    """
-    Creates a deterministic train/validation split.
+class PreprocessedDataset(Dataset):
+    @dataclass
+    class SampleInfo:
+        image_path: Path
+        short_path: Path
+        tensor_path: Path
+        class_index: int
 
-    Loads the validation set from an artifact file if it exists.
-    Otherwise, it creates a new split and saves the validation file paths to the artifact.
-    """
-    if os.path.exists(artifact_path):
-        print(f"Loading validation set from artifact: {artifact_path}")
-        with open(artifact_path) as f:
-            val_files = {line.strip() for line in f}
+    def __init__(self, root_dir: str | os.PathLike, data_transform: Any):
+        self.raw_images = find_images([root_dir])
+        relative_images = [image.relative_to(root_dir) for image in self.raw_images]
 
-        train_indices, val_indices = [], []
-        for i, (path, _) in enumerate(dataset.samples):
-            if path in val_files:
-                val_indices.append(i)
-            else:
-                train_indices.append(i)
+        self.class_names = sorted({image_file.parts[0] for image_file in relative_images})
+        self.class_to_idx = {name: i for i, name in enumerate(self.class_names)}
 
-        train_subset = Subset(dataset, train_indices)
-        val_subset = Subset(dataset, val_indices)
+        self.samples = []
+        for raw_path, rel_path in zip(self.raw_images, relative_images):
+            class_name = rel_path.parts[0]
+            class_idx = self.class_to_idx[class_name]
+            target_path = raw_path.with_suffix(".pt")
+            self.samples.append(PreprocessedDataset.SampleInfo(raw_path, rel_path, target_path, class_idx))
 
-    else:
-        print(f"Creating new validation set and saving to artifact: {artifact_path}")
-        num_samples = len(dataset)
-        val_size = int(val_split_ratio * num_samples)
-        train_size = num_samples - val_size
+        for sample in tqdm(self.samples, desc="Preprocessing Images"):
+            if sample.tensor_path.is_file():
+                continue
 
-        generator = torch.Generator().manual_seed(42)
-        train_subset, val_subset = random_split(dataset, [train_size, val_size], generator=generator)
+            sample.tensor_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(artifact_path, "w") as f:
-            for idx in val_subset.indices:
-                filepath = dataset.samples[idx][0]
-                f.write(f"{filepath}\n")
+            image = Image.open(sample.image_path).convert("RGB")
+            tensor = data_transform(image)
+            torch.save(tensor, sample.tensor_path)
 
-    return train_subset, val_subset
+    @property
+    def classes(self) -> list[str]:
+        return self.class_names
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx) -> tuple[Any, int]:
+        sample: PreprocessedDataset.SampleInfo = self.samples[idx]
+        tensor = torch.load(sample.tensor_path)
+        return tensor, sample.class_index
+
+    def get_deterministic_split(self, val_split_ratio: float, artifact_path: str = "validation_set.txt"):
+        """
+        Creates a deterministic train/validation split.
+
+        Loads the validation set from an artifact file if it exists.
+        Otherwise, it creates a new split and saves the validation file paths to the artifact.
+        """
+
+        if os.path.exists(artifact_path):
+            # TODO: This is incorrect, it'll never grow the validation set with newly added files.
+            print(f"Loading validation set from artifact: {artifact_path}")
+            with open(artifact_path) as f:
+                val_files = {line.strip() for line in f}
+
+            train_indices, val_indices = [], []
+            for i, sample in enumerate(self.samples):
+                if sample.short_path in val_files:
+                    val_indices.append(i)
+                else:
+                    train_indices.append(i)
+
+            train_subset = Subset(self, train_indices)
+            val_subset = Subset(self, val_indices)
+
+        else:
+            print(f"Creating new validation set and saving to artifact: {artifact_path}")
+            num_samples = len(self)
+            val_size = int(val_split_ratio * num_samples)
+            train_size = num_samples - val_size
+
+            generator = torch.Generator().manual_seed(42)
+            train_subset, val_subset = random_split(self, [train_size, val_size], generator=generator)
+
+            with open(artifact_path, "w") as f:
+                for idx in val_subset.indices:
+                    filepath = self.samples[idx].short_path
+                    f.write(f"{filepath}\n")
+
+        return train_subset, val_subset
 
 
 def _run_lr_finder(
@@ -206,10 +260,7 @@ def train_model(
     find_lr: bool = False,
 ):
     """Loads data, fine-tunes a pretrained model, and trains with early stopping."""
-    dataset = ImageFolder(root=data_dir, transform=data_transform, allow_empty=True)
-    if not dataset:
-        print("No images found in any of the subdirectories. Exiting.")
-        return
+    dataset = PreprocessedDataset(data_dir, data_transform)
 
     if not output_dir:
         output_dir = "."
@@ -235,7 +286,7 @@ def train_model(
 
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
 
-    train_dataset, val_dataset = get_deterministic_split(dataset, val_split_ratio=0.2)
+    train_dataset, val_dataset = dataset.get_deterministic_split(val_split_ratio=0.2)
     if not val_dataset:
         print("Validation set is empty. Check your data distribution or split ratio. Aborting.")
         return
