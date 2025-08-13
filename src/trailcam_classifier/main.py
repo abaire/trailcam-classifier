@@ -10,7 +10,7 @@ import torch
 from PIL import Image
 from torchvision.models import EfficientNet_V2_S_Weights, efficientnet_v2_s
 
-from trailcam_classifier.util import find_images
+from trailcam_classifier.util import MODEL_SAVE_FILENAME, find_images, get_best_device
 
 
 def load_classifier(model_path: str, class_names_path: str):
@@ -22,22 +22,18 @@ def load_classifier(model_path: str, class_names_path: str):
         print(f"Error: Class names file not found at {class_names_path}", file=sys.stderr)
         sys.exit(1)
 
-    # Load the class names
     with open(class_names_path) as f:
         class_names = [line.strip() for line in f]
     num_classes = len(class_names)
 
-    # Recreate the model structure
+    device = get_best_device()
+
     weights = EfficientNet_V2_S_Weights.DEFAULT
     model = efficientnet_v2_s(weights=None, num_classes=num_classes)
 
-    # Load the trained weights (the state_dict)
-    model.load_state_dict(torch.load(model_path))
+    checkpoint = torch.load(model_path, map_location=device)
+    model.load_state_dict(checkpoint["model_state_dict"])
 
-    # Set up device and put model in evaluation mode
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-    )
     model.to(device)
     model.eval()
 
@@ -76,7 +72,7 @@ def main():
     parser.add_argument(
         "--model",
         "-m",
-        default="image_classifier_model.pth",
+        default=MODEL_SAVE_FILENAME,
         help="Path to the .pth model weights file (default: image_classifier_model.pth).",
     )
     parser.add_argument(

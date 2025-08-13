@@ -15,15 +15,13 @@ from torch_lr_finder import LRFinder
 from torchvision.models import EfficientNet, EfficientNet_V2_S_Weights, efficientnet_v2_s
 from tqdm import tqdm
 
-from trailcam_classifier.util import find_images
+from trailcam_classifier.util import MODEL_SAVE_FILENAME, find_images, get_best_device
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 weights = EfficientNet_V2_S_Weights.DEFAULT
 data_transform = weights.transforms()
-
-MODEL_SAVE_FILENAME = "trailcam_classifier_model.pth"
 
 
 class PreprocessedDataset(Dataset):
@@ -135,9 +133,7 @@ def _create_model(num_classes: int) -> tuple[device, EfficientNet]:
     in_features = model.classifier[1].in_features
     model.classifier[1] = nn.Linear(in_features, num_classes)
 
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-    )
+    device = get_best_device()
     model.to(device)
 
     return device, model
