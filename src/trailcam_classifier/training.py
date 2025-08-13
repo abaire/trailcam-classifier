@@ -200,6 +200,8 @@ def train_model(
     num_epochs: int = 1000,
     learning_rate: float = 0.0015,
     patience: int = 8,
+    loader_workers: int = 8,
+    batch_size: int = 64,
     *,
     find_lr: bool = False,
 ):
@@ -225,7 +227,9 @@ def train_model(
 
     if find_lr:
         train_dataset = dataset
-        train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
+        train_loader = DataLoader(
+            train_dataset, batch_size=batch_size, shuffle=True, num_workers=loader_workers, pin_memory=True
+        )
         _run_lr_finder(model, optimizer, criterion, dev, train_loader)
         return
 
@@ -236,8 +240,12 @@ def train_model(
         print("Validation set is empty. Check your data distribution or split ratio. Aborting.")
         return
 
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True, num_workers=loader_workers, pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=batch_size, shuffle=False, num_workers=loader_workers, pin_memory=True
+    )
 
     print(f"Training on {len(train_dataset)} images, validating on {len(val_dataset)} images.")
 
