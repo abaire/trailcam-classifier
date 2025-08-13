@@ -153,7 +153,7 @@ def _run_training(
     return all_labels_epoch, all_preds_epoch, best_checkpoint_data
 
 
-def train_model(data_dir: str, num_epochs: int = 1000, learning_rate: float = 0.001, patience: int = 5):
+def train_model(data_dir: str, num_epochs: int = 1000, learning_rate: float = 0.0015, patience: int = 5):
     """Loads data, fine-tunes a pretrained model, and trains with early stopping."""
     dataset = ImageFolder(root=data_dir, transform=data_transform, allow_empty=True)
     if not dataset:
