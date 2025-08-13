@@ -8,11 +8,14 @@ import torch
 from sklearn.metrics import accuracy_score, classification_report
 from torch import device, nn, optim
 from torch.utils.data import DataLoader, Subset, random_split
+from torch_lr_finder import LRFinder
 from torchvision.datasets import ImageFolder
 from torchvision.models import EfficientNet, EfficientNet_V2_S_Weights, efficientnet_v2_s
 
 weights = EfficientNet_V2_S_Weights.DEFAULT
 data_transform = weights.transforms()
+
+MODEL_SAVE_FILENAME = "trailcam_classifier_model.pth"
 
 
 def get_deterministic_split(dataset: ImageFolder, val_split_ratio: float, artifact_path: str = "validation_set.txt"):
@@ -54,6 +57,21 @@ def get_deterministic_split(dataset: ImageFolder, val_split_ratio: float, artifa
     return train_subset, val_subset
 
 
+def _run_lr_finder(
+    model: EfficientNet,
+    optimizer,
+    criterion,
+    device: device,
+    train_loader: DataLoader,
+):
+    """Runs the learning rate finder, plots the results, and suggests a rate."""
+    lr_finder = LRFinder(model, optimizer, criterion, device=device)
+    lr_finder.range_test(train_loader, end_lr=100, num_iter=100)
+    lr_finder.plot(log_lr=True)
+
+    lr_finder.reset()
+
+
 def _create_model(num_classes: int) -> tuple[device, EfficientNet]:
     model = efficientnet_v2_s(weights=weights)
 
@@ -69,6 +87,27 @@ def _create_model(num_classes: int) -> tuple[device, EfficientNet]:
     model.to(device)
 
     return device, model
+
+
+def _load_checkpoint(
+    model_save_path: str,
+    model: EfficientNet,
+    optimizer,
+    scheduler,
+) -> tuple[int, float]:
+    start_epoch = 0
+    best_val_loss = float("inf")
+    if os.path.exists(model_save_path):
+        print(f"Loading checkpoint from {model_save_path}")
+        checkpoint = torch.load(model_save_path)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        start_epoch = checkpoint["epoch"] + 1
+        best_val_loss = checkpoint["best_val_loss"]
+        print(f"Resuming training from epoch {start_epoch} with best val loss {best_val_loss:.4f}")
+
+    return start_epoch, best_val_loss
 
 
 def _run_training(
@@ -90,6 +129,8 @@ def _run_training(
     all_preds_epoch, all_labels_epoch = [], []
 
     for epoch in range(start_epoch, max_epochs):
+        print(f"Epoch {epoch+1}/{max_epochs} begin...")
+
         model.train()
         running_train_loss = 0.0
         for inputs_raw, labels_raw in train_loader:
@@ -153,16 +194,42 @@ def _run_training(
     return all_labels_epoch, all_preds_epoch, best_checkpoint_data
 
 
-def train_model(data_dir: str, num_epochs: int = 1000, learning_rate: float = 0.0015, patience: int = 5):
+def train_model(
+    data_dir: str,
+    output_dir: str | None = None,
+    num_epochs: int = 1000,
+    learning_rate: float = 0.0015,
+    patience: int = 8,
+    *,
+    find_lr: bool = False,
+):
     """Loads data, fine-tunes a pretrained model, and trains with early stopping."""
     dataset = ImageFolder(root=data_dir, transform=data_transform, allow_empty=True)
     if not dataset:
         print("No images found in any of the subdirectories. Exiting.")
         return
 
+    if not output_dir:
+        output_dir = "."
+    output_dir = os.path.abspath(os.path.expanduser(output_dir))
+    os.makedirs(output_dir, exist_ok=True)
+
     class_names = dataset.classes
     num_classes = len(class_names)
     print(f"Found {len(dataset)} images in {num_classes} classes: {class_names}")
+
+    dev, model = _create_model(num_classes)
+    optimizer = optim.AdamW(model.classifier.parameters(), lr=learning_rate)
+    criterion = nn.CrossEntropyLoss()
+    print(f"Using device: {dev}")
+
+    if find_lr:
+        train_dataset = dataset
+        train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
+        _run_lr_finder(model, optimizer, criterion, dev, train_loader)
+        return
+
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
 
     train_dataset, val_dataset = get_deterministic_split(dataset, val_split_ratio=0.2)
     if not val_dataset:
@@ -171,33 +238,18 @@ def train_model(data_dir: str, num_epochs: int = 1000, learning_rate: float = 0.
 
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4, pin_memory=True)
+
     print(f"Training on {len(train_dataset)} images, validating on {len(val_dataset)} images.")
 
-    dev, model = _create_model(num_classes)
-    optimizer = optim.AdamW(model.classifier.parameters(), lr=learning_rate)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
-    print(f"Using device: {dev}")
-
-    # --- Checkpoint Loading ---
-    model_save_path = "image_classifier_model.pth"
-    start_epoch = 0
-    best_val_loss = float("inf")
-    if os.path.exists(model_save_path):
-        print(f"Loading checkpoint from {model_save_path}")
-        checkpoint = torch.load(model_save_path)
-        model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        start_epoch = checkpoint["epoch"] + 1
-        best_val_loss = checkpoint["best_val_loss"]
-        print(f"Resuming training from epoch {start_epoch} with best val loss {best_val_loss:.4f}")
+    model_save_path = os.path.join(output_dir, MODEL_SAVE_FILENAME)
+    start_epoch, best_val_loss = _load_checkpoint(model_save_path, model, optimizer, scheduler)
 
     all_labels, all_preds, best_checkpoint = _run_training(
         dev,
         model,
         optimizer,
         scheduler,
-        nn.CrossEntropyLoss(),
+        criterion,
         train_loader,
         val_loader,
         num_epochs,
@@ -234,11 +286,16 @@ def train_model(data_dir: str, num_epochs: int = 1000, learning_rate: float = 0.
 def main():
     parser = argparse.ArgumentParser(description="Train an image classifier.")
     parser.add_argument("data_dir", type=str, help="Directory containing the classified image folders.")
+    parser.add_argument("--learning-rate", "-L", default=4.0e-3, type=float, help="Initial learning rate")
+    parser.add_argument(
+        "--find-lr", action="store_true", help="Run the learning rate finder instead of a full training run."
+    )
+    parser.add_argument("--output", "-o", help="Directory into which trained model outputs will be written.")
     args = parser.parse_args()
 
     data_dir = os.path.abspath(os.path.expanduser(args.data_dir))
 
-    train_model(data_dir=data_dir)
+    train_model(data_dir=data_dir, output_dir=args.output, learning_rate=args.learning_rate, find_lr=args.find_lr)
 
 
 if __name__ == "__main__":
