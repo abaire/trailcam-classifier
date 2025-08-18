@@ -8,6 +8,7 @@ import itertools
 # ruff: noqa: TRY300 Consider moving this statement to an `else` block
 # ruff: noqa: BLE001 Do not catch blind exception: `Exception`
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -96,5 +97,4 @@ if __name__ == "__main__":
             continue
 
         output_path = os.path.join(os.path.dirname(image), output_filename)
-        print(f"mv {image} {output_path}")
-        # shutil.move(image, output_path)
+        shutil.move(image, output_path)
