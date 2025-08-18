@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+
 import trailcam_classifier.main
 import trailcam_classifier.training
 
 
 def run() -> int:
-    return trailcam_classifier.main.main()
+    return asyncio.run(trailcam_classifier.main.main())
 
 
 def train() -> int:

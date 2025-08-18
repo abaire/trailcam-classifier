@@ -2,15 +2,21 @@ from __future__ import annotations
 
 # ruff: noqa: T201 `print` found
 import argparse
+import asyncio
 import os
 import shutil
 import sys
+from typing import TYPE_CHECKING
 
 import torch
 from PIL import Image
+from producer_graph import NO_OUTPUT, Pipeline, standard_node
 from torchvision.models import EfficientNet_V2_S_Weights, efficientnet_v2_s
 
 from trailcam_classifier.util import MODEL_SAVE_FILENAME, find_images, get_best_device
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def load_classifier(model_path: str, class_names_path: str):
@@ -59,7 +65,7 @@ def predict_image(image_path: str, model, device, transform):
     return predicted_idx, confidence
 
 
-def main():
+async def main():
     parser = argparse.ArgumentParser(
         description="A utility to automatically classify JPG images based on their contents.",
         epilog="Example: python classify.py ./photos_to_classify",
@@ -103,13 +109,17 @@ def main():
 
     print(f"\nFound {len(image_paths)} images. Starting classification...")
 
-    for image_path in image_paths:
-        predicted_idx, confidence = predict_image(image_path, model, device, transform)
+    def _classify(image_path: Path) -> tuple[Path, str, float]:
+        predicted_idx, confidence = predict_image(str(image_path), model, device, transform)
 
         if predicted_idx is None:
-            continue
+            return NO_OUTPUT
 
         predicted_class = class_names[predicted_idx]
+        return image_path, predicted_class, confidence
+
+    def _save_output(result: tuple[Path, str, float]) -> None:
+        image_path, predicted_class, confidence = result
         filename = os.path.basename(image_path)
         dest_dir = os.path.join(output_root, predicted_class)
         dest_path = os.path.join(dest_dir, filename)
@@ -123,9 +133,29 @@ def main():
             shutil.move(image_path, dest_path)
             print(f"✅ Moved '{filename}' to '{predicted_class}' (Confidence: {confidence:.2%})")
 
-    print("\nClassification complete.")
+    producer_graph = [
+        standard_node(
+            name="classify",
+            transform=_classify,
+            spawn_thread=True,
+            num_workers=1,
+            max_queue_size=1000,
+        ),
+        standard_node(
+            name="save_output",
+            transform=_save_output,
+            spawn_thread=True,
+            num_workers=2,
+            max_queue_size=100,
+            input_node="classify",
+        ),
+    ]
+
+    pipeline = Pipeline(producer_graph)
+    await pipeline.run(image_paths)
+
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(asyncio.run(main()))
