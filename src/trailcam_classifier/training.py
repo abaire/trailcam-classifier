@@ -251,7 +251,7 @@ def train_model(
     learning_rate: float = 0.0015,
     patience: int = 8,
     loader_workers: int = 8,
-    batch_size: int = 64,
+    batch_size: int = 256,
     *,
     find_lr: bool = False,
 ):
