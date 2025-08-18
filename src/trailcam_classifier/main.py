@@ -84,6 +84,7 @@ def main():
     parser.add_argument(
         "--print-only", action="store_true", help="Print the classification for each file instead of moving them."
     )
+    parser.add_argument("--copy", "-c", action="store_true", help="Copy files to outputs instead of moving them.")
     args = parser.parse_args()
 
     model_path = args.model
@@ -115,6 +116,9 @@ def main():
 
         if args.print_only:
             print(f"mv '{filename}' to '{predicted_class}' (Confidence: {confidence:.2%})")
+        elif args.copy:
+            shutil.copy2(image_path, dest_path)
+            print(f"✅ Copied '{filename}' to '{predicted_class}' (Confidence: {confidence:.2%})")
         else:
             shutil.move(image_path, dest_path)
             print(f"✅ Moved '{filename}' to '{predicted_class}' (Confidence: {confidence:.2%})")
