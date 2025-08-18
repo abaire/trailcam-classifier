@@ -2,9 +2,9 @@ from __future__ import annotations
 
 # ruff: noqa: T201 `print` found
 import argparse
+import logging
 import os
 import time
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -80,10 +80,10 @@ class PreprocessedDataset(Dataset):
 
         if os.path.exists(artifact_path):
             # TODO: This is incorrect, it'll never grow the validation set with newly added files.
-            logger.info(f"Loading validation set from artifact: {artifact_path}")
+            logger.info("Loading validation set from artifact: %s", artifact_path)
             with open(artifact_path, encoding="utf-8") as infile:
                 val_files = {Path(line.strip()) for line in infile}
-            logger.debug(f"Loaded {len(val_files)} entries")
+            logger.debug("Loaded %d entries", len(val_files))
 
             train_indices, val_indices = [], []
             for i, sample in enumerate(self.samples):
@@ -96,7 +96,7 @@ class PreprocessedDataset(Dataset):
             val_subset = Subset(self, val_indices)
 
         else:
-            logger.info(f"Creating new validation set and saving to artifact: {artifact_path}")
+            logger.info("Creating new validation set and saving to artifact: %s", artifact_path)
             num_samples = len(self)
             val_size = int(val_split_ratio * num_samples)
             train_size = num_samples - val_size
@@ -151,14 +151,14 @@ def _load_checkpoint(
     start_epoch = 0
     best_val_loss = float("inf")
     if os.path.exists(model_save_path):
-        logger.info(f"Loading checkpoint from {model_save_path}")
+        logger.info("Loading checkpoint from %s", model_save_path)
         checkpoint = torch.load(model_save_path)
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
-        best_val_loss = checkpoint["best_val_loss"]
-        logger.info(f"Resuming training from epoch {start_epoch} with best val loss {best_val_loss:.4f}")
+        best_val_loss = float(checkpoint["best_val_loss"])
+        logger.info("Resuming training from epoch %d with best val loss %.4f", start_epoch, best_val_loss)
 
     return start_epoch, best_val_loss
 
@@ -184,9 +184,8 @@ def _run_training(
     class Timer:
         """A context manager to time a block of code and print the duration."""
 
-        def __init__(self, description: str, precision: int = 3):
+        def __init__(self, description: str):
             self.description = description
-            self.precision = precision
             self.start_time = None
 
         def __enter__(self):
@@ -197,10 +196,10 @@ def _run_training(
             """Stops the timer and prints the elapsed time when exiting the block."""
             end_time = time.perf_counter()
             elapsed_ms = (end_time - self.start_time) * 1000
-            logger.debug(f"'{self.description}' took {elapsed_ms:.{self.precision}f} ms")
+            logger.debug("'%s' took %s.3f ms", self.description, elapsed_ms)
 
     for epoch in range(start_epoch, max_epochs):
-        logger.info(f"Epoch {epoch+1}/{max_epochs} begin...")
+        logger.info("Epoch %d/%d begin...", epoch + 1, max_epochs)
 
         with Timer("model.train()"):
             model.train()
@@ -245,11 +244,13 @@ def _run_training(
         current_lr = scheduler.get_last_lr()[0]
 
         logger.info(
-            f"Epoch {epoch+1}/{max_epochs} -> "
-            f"Train Loss: {epoch_train_loss:.4f}, "
-            f"Val Loss: {epoch_val_loss:.4f}, "
-            f"Val Accuracy: {accuracy:.4f}, "
-            f"LR: {current_lr:.6f}"
+            "Epoch %d/%d -> " "Train Loss: %.4f, " "Val Loss: %.4f, " "Val Accuracy: %.4f, " "LR: %.6f",
+            epoch + 1,
+            max_epochs,
+            epoch_train_loss,
+            epoch_val_loss,
+            accuracy,
+            current_lr,
         )
 
         if epoch_val_loss < best_val_loss:
@@ -263,12 +264,12 @@ def _run_training(
                 "scheduler_state_dict": scheduler.state_dict(),
                 "best_val_loss": best_val_loss,
             }
-            logger.info(f"✨ Validation loss improved to {best_val_loss:.4f}. Saving checkpoint.")
+            logger.info("✨ Validation loss improved to %.4f. Saving checkpoint.", best_val_loss)
         else:
             epochs_without_improvement += 1
 
         if epochs_without_improvement >= patience:
-            logger.info(f"\nEarly stopping triggered after {patience} epochs with no improvement.")
+            logger.info("\nEarly stopping triggered after %d epochs with no improvement.", patience)
             break
 
     return all_labels_epoch, all_preds_epoch, best_checkpoint_data
@@ -295,12 +296,12 @@ def train_model(
 
     class_names = dataset.classes
     num_classes = len(class_names)
-    logger.info(f"Found {len(dataset)} images in {num_classes} classes: {class_names}")
+    logger.info("Found %d images in %d classes: %s", len(dataset), num_classes, sorted(class_names))
 
     dev, model = _create_model(num_classes)
     optimizer = optim.AdamW(model.classifier.parameters(), lr=learning_rate)
     criterion = nn.CrossEntropyLoss()
-    logger.info(f"Using device: {dev}")
+    logger.info("Using device: %s", dev)
 
     if find_lr:
         train_dataset = dataset
@@ -324,7 +325,7 @@ def train_model(
         val_dataset, batch_size=batch_size, shuffle=False, num_workers=loader_workers, pin_memory=True
     )
 
-    logger.info(f"Training on {len(train_dataset)} images, validating on {len(val_dataset)} images.")
+    logger.info("Training on %d images, validating on %d images.", len(train_dataset), len(val_dataset))
 
     model_save_path = os.path.join(output_dir, MODEL_SAVE_FILENAME)
     start_epoch, best_val_loss = _load_checkpoint(model_save_path, model, optimizer, scheduler)
@@ -376,6 +377,9 @@ def main():
         "--find-lr", action="store_true", help="Run the learning rate finder instead of a full training run."
     )
     parser.add_argument("--output", "-o", help="Directory into which trained model outputs will be written.")
+    parser.add_argument(
+        "--patience", type=int, default=8, help="Maximum number of epochs without improvement before early exit."
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output.")
     args = parser.parse_args()
 
@@ -384,7 +388,13 @@ def main():
 
     data_dir = os.path.abspath(os.path.expanduser(args.data_dir))
 
-    train_model(data_dir=data_dir, output_dir=args.output, learning_rate=args.learning_rate, find_lr=args.find_lr)
+    train_model(
+        data_dir=data_dir,
+        output_dir=args.output,
+        learning_rate=args.learning_rate,
+        find_lr=args.find_lr,
+        patience=args.patience,
+    )
 
 
 if __name__ == "__main__":
