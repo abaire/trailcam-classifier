@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 # ruff: noqa: T201 `print` found
+# ruff: noqa: PLR2004 Magic value used in comparison
+# ruff: noqa: DTZ007 Naive datetime constructed using `datetime.datetime.strptime()` without %z
 import argparse
 import asyncio
 import os
@@ -13,7 +15,7 @@ from PIL import Image
 from producer_graph import NO_OUTPUT, Pipeline, standard_node
 from torchvision.models import EfficientNet_V2_S_Weights, efficientnet_v2_s
 
-from trailcam_classifier.util import MODEL_SAVE_FILENAME, find_images, get_best_device
+from trailcam_classifier.util import MODEL_SAVE_FILENAME, find_images, get_best_device, get_image_datetime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -109,20 +111,40 @@ async def main():
 
     print(f"\nFound {len(image_paths)} images. Starting classification...")
 
-    def _classify(image_path: Path) -> tuple[Path, str, float]:
+    def _calculate_output_filename(image_path: Path) -> tuple[Path, str]:
+        filename = os.path.basename(image_path)
+        date_taken = get_image_datetime(image_path)
+        if date_taken:
+            base, ext = os.path.splitext(filename)
+            timestamp_string = f"{date_taken.strftime('%Y%m%d-%H%M%S')}_"
+            if not filename.startswith(timestamp_string):
+                filename = f"{timestamp_string}{base}{ext}"
+        return image_path, filename
+
+    def _classify(image_path: Path, output_filename: str) -> tuple[Path, str, str, float]:
         predicted_idx, confidence = predict_image(str(image_path), model, device, transform)
 
         if predicted_idx is None:
             return NO_OUTPUT
 
         predicted_class = class_names[predicted_idx]
-        return image_path, predicted_class, confidence
+        return image_path, output_filename, predicted_class, confidence
 
-    def _save_output(result: tuple[Path, str, float]) -> None:
-        image_path, predicted_class, confidence = result
-        filename = os.path.basename(image_path)
+    def _save_output(result: tuple[Path, str, str, float]) -> None:
+        image_path, output_filename, predicted_class, confidence = result
+
+        base, ext = os.path.splitext(output_filename)
+        base += f"_C{round(confidence * 100)}"
+
+        filename = f"{base}{ext}"
         dest_dir = os.path.join(output_root, predicted_class)
         dest_path = os.path.join(dest_dir, filename)
+
+        counter = 1
+        while os.path.exists(dest_path):
+            filename = f"{base}_{counter}{ext}"
+            dest_path = os.path.join(dest_dir, filename)
+            counter += 1
 
         if args.print_only:
             print(f"mv '{filename}' to '{predicted_class}' (Confidence: {confidence:.2%})")
@@ -134,12 +156,14 @@ async def main():
             print(f"✅ Moved '{filename}' to '{predicted_class}' (Confidence: {confidence:.2%})")
 
     producer_graph = [
+        standard_node(name="augment_filename", transform=_calculate_output_filename, num_workers=4, max_queue_size=128),
         standard_node(
             name="classify",
             transform=_classify,
             spawn_thread=True,
             num_workers=1,
             max_queue_size=1000,
+            input_node="augment_filename",
         ),
         standard_node(
             name="save_output",

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+# ruff: noqa: DTZ007 Naive datetime constructed using `datetime.datetime.strptime()` without %z
 import itertools
 import os
+from datetime import datetime
 from pathlib import Path
 
 import torch
+from PIL import Image
+from PIL.ExifTags import TAGS
 
 DEFAULT_IMAGE_EXTENSIONS = {"jpg", "jpeg"}
 
@@ -42,3 +46,31 @@ def find_images(
         return filename.suffix[1:].lower() in extensions
 
     return {filename for filename in all_files if keep_file(filename)}
+
+
+def get_image_datetime(image_path) -> datetime | None:
+    """
+    Extracts the best available timestamp from an image's EXIF data and
+    returns it as a datetime object. It checks for 'DateTimeOriginal',
+    'DateTimeDigitized', and 'DateTime' in that order.
+    """
+    image = Image.open(image_path)
+    exif_data = image.getexif()
+
+    if not exif_data:
+        return None
+
+    tag_dict = {TAGS[key]: val for key, val in exif_data.items() if key in TAGS}
+
+    date_tags = ["DateTimeOriginal", "DateTimeDigitized", "DateTime"]
+    date_str = None
+
+    for tag in date_tags:
+        if tag in tag_dict:
+            date_str = tag_dict[tag]
+            break
+
+    if not date_str:
+        return None
+
+    return datetime.strptime(date_str, "%Y:%m:%d %H:%M:%S")
