@@ -121,7 +121,8 @@ async def main():
                 filename = f"{timestamp_string}{base}{ext}"
         return image_path, filename
 
-    def _classify(image_path: Path, output_filename: str) -> tuple[Path, str, str, float]:
+    def _classify(input_data: tuple[Path, str]) -> tuple[Path, str, str, float]:
+        image_path, output_filename = input_data
         predicted_idx, confidence = predict_image(str(image_path), model, device, transform)
 
         if predicted_idx is None:
