@@ -6,6 +6,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from enum import Enum, auto
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,24 @@ logger = logging.getLogger(__name__)
 
 weights = EfficientNet_V2_S_Weights.DEFAULT
 data_transform = weights.transforms()
+
+
+class SchedulerMode(Enum):
+    COSINE_ANNEALING = auto()
+    PLATEAU = auto()
+    ONECYCLE = auto()
+
+    @classmethod
+    def from_string(cls, val: str):
+        if val.lower() == "cosine_annealing":
+            return cls.COSINE_ANNEALING
+        if val.lower() == "plateau":
+            return cls.PLATEAU
+        if val.lower() == "onecycle":
+            return cls.ONECYCLE
+
+        msg = f"Invalid enum value {val}"
+        raise ValueError(msg)
 
 
 class PreprocessedDataset(Dataset):
@@ -179,6 +198,7 @@ def _run_training(
     patience: int,
     start_epoch: int,
     best_val_loss: float,
+    scheduler_mode: SchedulerMode,
 ) -> tuple[list, list, dict | None]:
     epochs_without_improvement = 0
     best_checkpoint_data = None
@@ -225,7 +245,8 @@ def _run_training(
 
             running_train_loss += loss.item() * inputs.size(0)
 
-            scheduler.step()
+            if scheduler_mode == SchedulerMode.ONECYCLE:
+                scheduler.step()
 
         epoch_train_loss = running_train_loss / len(train_loader.dataset)
 
@@ -246,7 +267,11 @@ def _run_training(
         epoch_val_loss = running_val_loss / len(validation_loader.dataset)
         accuracy = accuracy_score(all_labels_epoch, all_preds_epoch)
 
-        # scheduler.step(epoch_val_loss)
+        if scheduler_mode == SchedulerMode.PLATEAU:
+            scheduler.step(epoch_val_loss)
+        elif scheduler_mode == SchedulerMode.COSINE_ANNEALING:
+            scheduler.step()
+
         current_lr = scheduler.get_last_lr()[0]
 
         logger.info(
@@ -289,6 +314,7 @@ def train_model(
     patience: int = 8,
     loader_workers: int = 8,
     batch_size: int = 128,
+    scheduler_mode: SchedulerMode = SchedulerMode.COSINE_ANNEALING,
     *,
     find_lr: bool = False,
 ):
@@ -331,17 +357,24 @@ def train_model(
 
     logger.info("Training on %d images, validating on %d images.", len(train_dataset), len(val_dataset))
 
-    # scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
-    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-    #     optimizer,
-    #     mode="min",
-    #     factor=0.2,
-    #     patience=patience,
-    #     min_lr=1e-6,
-    # )
-    scheduler = optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=learning_rate, steps_per_epoch=len(train_loader), epochs=num_epochs
-    )
+    if scheduler_mode == SchedulerMode.COSINE_ANNEALING:
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
+    elif scheduler_mode == SchedulerMode.PLATEAU:
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=0.2,
+            patience=patience,
+            min_lr=1e-6,
+        )
+    elif scheduler_mode == SchedulerMode.ONECYCLE:
+        steps_per_epoch = len(train_loader) // batch_size
+        scheduler = optim.lr_scheduler.OneCycleLR(
+            optimizer, max_lr=learning_rate, steps_per_epoch=steps_per_epoch, epochs=num_epochs
+        )
+    else:
+        msg = f"Invalid scheduler mode {scheduler_mode}"
+        raise ValueError(msg)
 
     model_save_path = os.path.join(output_dir, MODEL_SAVE_FILENAME)
     start_epoch, best_val_loss = _load_checkpoint(model_save_path, model, optimizer, scheduler)
@@ -358,6 +391,7 @@ def train_model(
         patience,
         start_epoch,
         best_val_loss,
+        scheduler_mode,
     )
 
     print("\n--- Final Validation Report ---")
@@ -398,6 +432,12 @@ def main():
     )
     parser.add_argument("--batch-size", "-b", default=128, type=int, help="Batch size for training.")
     parser.add_argument("--epochs", "-e", default=1000, type=int, help="Maximum number of epochs to train.")
+    parser.add_argument(
+        "--scheduler-mode",
+        choices=["plateau", "onecycle", "cosine_annealing"],
+        default="cosine_annealing",
+        help="Scheduler type for optimizer.",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output.")
     args = parser.parse_args()
 
@@ -414,6 +454,7 @@ def main():
         batch_size=args.batch_size,
         find_lr=args.find_lr,
         patience=args.patience,
+        scheduler_mode=SchedulerMode.from_string(args.scheduler_mode),
     )
 
 
