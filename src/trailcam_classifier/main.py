@@ -104,7 +104,8 @@ async def main():
     for name in class_names:
         os.makedirs(os.path.join(output_root, name), exist_ok=True)
 
-    image_paths = find_images(args.dirs, args.output)
+    print(f"Looking for images in dirs {args.dirs}")
+    image_paths = find_images(args.dirs, [args.output])
     if not image_paths:
         print("No images found to classify.")
         return 0
