@@ -397,6 +397,7 @@ def main():
         "--patience", type=int, default=8, help="Maximum number of epochs without improvement before early exit."
     )
     parser.add_argument("--batch-size", "-b", default=128, type=int, help="Batch size for training.")
+    parser.add_argument("--epochs", "-e", default=1000, type=int, help="Maximum number of epochs to train.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output.")
     args = parser.parse_args()
 
@@ -408,6 +409,7 @@ def main():
     train_model(
         data_dir=data_dir,
         output_dir=args.output,
+        num_epochs=args.epochs,
         learning_rate=args.learning_rate,
         batch_size=args.batch_size,
         find_lr=args.find_lr,
