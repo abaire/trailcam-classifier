@@ -9,6 +9,7 @@ dist/
 
 validation_set.txt
 class_names.txt
+split_artifact.json
 trailcam_classifier_model.pth
 classified_output/
 model/

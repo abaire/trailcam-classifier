@@ -2,9 +2,12 @@ from __future__ import annotations
 
 # ruff: noqa: T201 `print` found
 # ruff: noqa: PLR2004 Magic value used in comparison,
+# ruff: noqa: S311 Standard pseudo-random generators are not suitable for cryptographic purposes
 import argparse
+import json
 import logging
 import os
+import random
 import time
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -17,6 +20,7 @@ from sklearn.metrics import accuracy_score, classification_report
 from torch import device, nn, optim
 from torch.utils.data import DataLoader, Dataset, Subset, random_split
 from torch_lr_finder import LRFinder
+from torchvision import transforms
 from torchvision.models import EfficientNet, EfficientNet_V2_S_Weights, efficientnet_v2_s
 from tqdm import tqdm
 
@@ -25,7 +29,65 @@ from trailcam_classifier.util import MODEL_SAVE_FILENAME, find_images, get_best_
 logger = logging.getLogger(__name__)
 
 weights = EfficientNet_V2_S_Weights.DEFAULT
-data_transform = weights.transforms()
+
+
+class CropInfoBar:
+    """A transform to clip the info bar off the bottom of an image."""
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        width, height = img.size
+        clip_heights = {
+            1080: 1008,
+            1512: 1411,
+            2376: 2217,
+        }
+        target_height = clip_heights.get(height)
+        if not target_height:
+            msg = f"Unexpected image height {height}"
+            raise ValueError(msg)
+
+        crop_box = (0, 0, width, target_height)
+        return img.crop(crop_box)
+
+
+def get_transforms(
+    augmentation_strength: float = 1.0,
+) -> tuple[transforms.Compose, transforms.Compose]:
+    """
+    Returns a tuple of transforms for training and validation.
+
+    Augmentation strength parameter scales the intensity of the augmentations.
+    """
+    normalization = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    crop_size = 384  # From EfficientNetV2-S spec
+
+    train_transform = transforms.Compose(
+        [
+            CropInfoBar(),
+            transforms.Resize(crop_size, interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.CenterCrop(crop_size),
+            transforms.RandomHorizontalFlip(),
+            transforms.ColorJitter(
+                brightness=0.2 * augmentation_strength,
+                contrast=0.2 * augmentation_strength,
+                saturation=0.2 * augmentation_strength,
+            ),
+            transforms.ToTensor(),
+            normalization,
+        ]
+    )
+
+    val_transform = transforms.Compose(
+        [
+            CropInfoBar(),
+            transforms.Resize(crop_size, interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.CenterCrop(crop_size),
+            transforms.ToTensor(),
+            normalization,
+        ]
+    )
+
+    return train_transform, val_transform
 
 
 class SchedulerMode(Enum):
@@ -46,89 +108,26 @@ class SchedulerMode(Enum):
         raise ValueError(msg)
 
 
-class PreprocessedDataset(Dataset):
+class ImageDataset(Dataset):
     @dataclass
     class SampleInfo:
         image_path: Path
         short_path: Path
-        tensor_path: Path
         class_index: int
 
-    def __init__(self, root_dir: str | os.PathLike, data_transform: Any):
-        self.raw_images = find_images([root_dir])
-        relative_images = [image.relative_to(root_dir) for image in self.raw_images]
+    def __init__(self, root_dir: str | os.PathLike):
+        self.root_dir = Path(root_dir)
+        self.raw_images = find_images([self.root_dir])
+        relative_images = [image.relative_to(self.root_dir) for image in self.raw_images]
 
         self.class_names = sorted({image_file.parts[0] for image_file in relative_images})
         self.class_to_idx = {name: i for i, name in enumerate(self.class_names)}
 
         self.samples = []
-        tensor_parent_paths = set()
         for raw_path, rel_path in zip(self.raw_images, relative_images):
             class_name = rel_path.parts[0]
             class_idx = self.class_to_idx[class_name]
-            target_path = raw_path.with_suffix(".pt")
-            self.samples.append(PreprocessedDataset.SampleInfo(raw_path, rel_path, target_path, class_idx))
-            tensor_parent_paths.add(os.path.dirname(target_path))
-
-        for parent_path in tensor_parent_paths:
-            os.makedirs(parent_path, exist_ok=True)
-
-        extra_samples: list[PreprocessedDataset.SampleInfo] = []
-
-        for sample in tqdm(self.samples, desc="Preprocessing Images"):
-            if not sample.tensor_path.is_file():
-                with Image.open(sample.image_path).convert("RGB") as image:
-                    tensor = data_transform(image)
-                    torch.save(tensor, sample.tensor_path)
-
-            dir_name = os.path.dirname(sample.tensor_path)
-            base, ext = os.path.splitext(os.path.basename(sample.tensor_path))
-
-            clipped_tensor_path = os.path.join(dir_name, f"{base}_clip{ext}")
-            flipped_tensor_path = os.path.join(dir_name, f"{base}_clip_flip{ext}")
-
-            needs_clip = not os.path.isfile(clipped_tensor_path)
-            needs_flip = not os.path.isfile(flipped_tensor_path)
-            if not any({needs_clip, needs_flip}):
-                continue
-
-            # Clip off the info bar at the bottom of the image.
-            clip_heights = {
-                1080: 1008,
-                1512: 1411,
-                2376: 2217,
-            }
-
-            with Image.open(sample.image_path).convert("RGB") as image:
-                width, height = image.size
-
-                target_height = clip_heights.get(height)
-                if not target_height:
-                    msg = f"Unexpected image height {height} in {sample.image_path}"
-                    raise ValueError(msg)
-
-                crop_box = (0, 0, width, target_height)
-                cropped_img = image.crop(crop_box)
-
-                if needs_clip:
-                    tensor = data_transform(cropped_img)
-                    torch.save(tensor, clipped_tensor_path)
-                    extra_samples.append(
-                        PreprocessedDataset.SampleInfo(
-                            sample.image_path, sample.short_path, Path(clipped_tensor_path), sample.class_index
-                        )
-                    )
-                if needs_flip:
-                    mirrored_img = cropped_img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
-                    tensor = data_transform(mirrored_img)
-                    torch.save(tensor, flipped_tensor_path)
-                    extra_samples.append(
-                        PreprocessedDataset.SampleInfo(
-                            sample.image_path, sample.short_path, Path(flipped_tensor_path), sample.class_index
-                        )
-                    )
-
-        self.samples.extend(extra_samples)
+            self.samples.append(ImageDataset.SampleInfo(raw_path, rel_path, class_idx))
 
     @property
     def classes(self) -> list[str]:
@@ -138,55 +137,100 @@ class PreprocessedDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx) -> tuple[Any, int]:
-        sample: PreprocessedDataset.SampleInfo = self.samples[idx]
-        tensor = torch.load(sample.tensor_path)
-        return tensor, sample.class_index
+        sample: ImageDataset.SampleInfo = self.samples[idx]
+        image = Image.open(sample.image_path).convert("RGB")
+        return image, sample.class_index
 
-    def get_deterministic_split(self, val_split_ratio: float, artifact_path: str = "validation_set.txt"):
+    def get_deterministic_split(self, val_split_ratio: float, artifact_path: str = "split_artifact.json"):
         """
-        Creates a deterministic train/validation split.
+        Creates a deterministic train/validation split that is stable across runs.
 
-        Loads the validation set from an artifact file if it exists.
-        Otherwise, it creates a new split and saves the validation file paths to the artifact.
+        If an artifact file exists, it loads the split from there. Any new files
+        not in the artifact are split and added to the existing sets, and the
+        artifact is updated.
+
+        If no artifact exists, a new split is created and saved.
         """
-
         if os.path.exists(artifact_path):
-            # TODO: This is incorrect, it'll never grow the validation set with newly added files.
-            logger.info("Loading validation set from artifact: %s", artifact_path)
-            with open(artifact_path, encoding="utf-8") as infile:
-                val_files = {Path(line.strip()) for line in infile}
-            logger.debug("Loaded %d entries", len(val_files))
-
-            train_indices, val_indices = [], []
-            for i, sample in enumerate(self.samples):
-                if sample.short_path in val_files:
-                    val_indices.append(i)
-                else:
-                    train_indices.append(i)
-
-            train_subset = Subset(self, train_indices)
-            val_subset = Subset(self, val_indices)
-
+            logger.info("Loading train/val split from artifact: %s", artifact_path)
+            try:
+                with open(artifact_path, encoding="utf-8") as infile:
+                    split_data = json.load(infile)
+                train_paths = {Path(p) for p in split_data["train"]}
+                val_paths = {Path(p) for p in split_data["val"]}
+            except (json.JSONDecodeError, KeyError):
+                logger.warning("Could not read split artifact file. Creating a new split.")
+                os.remove(artifact_path)
+                train_paths, val_paths = set(), set()
         else:
-            logger.info("Creating new validation set and saving to artifact: %s", artifact_path)
+            train_paths, val_paths = set(), set()
+
+        if not train_paths and not val_paths:
+            logger.info("Creating new train/val split and saving to artifact: %s", artifact_path)
             num_samples = len(self)
             val_size = int(val_split_ratio * num_samples)
             train_size = num_samples - val_size
 
             generator = torch.Generator().manual_seed(42)
-            train_subset, val_subset = random_split(self, [train_size, val_size], generator=generator)
+            initial_train_subset, initial_val_subset = random_split(self, [train_size, val_size], generator=generator)
 
-            with open(artifact_path, "w") as f:
-                for idx in val_subset.indices:
-                    filepath = self.samples[idx].short_path
-                    f.write(f"{filepath}\n")
+            train_paths = {self.samples[i].short_path for i in initial_train_subset.indices}
+            val_paths = {self.samples[i].short_path for i in initial_val_subset.indices}
+
+        all_current_paths = {s.short_path for s in self.samples}
+        known_paths = train_paths.union(val_paths)
+        new_paths = all_current_paths - known_paths
+
+        if new_paths:
+            logger.info("Found %d new files. Splitting and adding to existing sets.", len(new_paths))
+            new_indices = [i for i, s in enumerate(self.samples) if s.short_path in new_paths]
+            num_new = len(new_indices)
+            val_size_new = int(val_split_ratio * num_new)
+
+            rng = random.Random(42)
+            rng.shuffle(new_indices)
+
+            new_val_indices = new_indices[:val_size_new]
+            new_train_indices = new_indices[val_size_new:]
+
+            train_paths.update(self.samples[i].short_path for i in new_train_indices)
+            val_paths.update(self.samples[i].short_path for i in new_val_indices)
+
+        with open(artifact_path, "w") as f:
+            json.dump(
+                {"train": sorted([str(p) for p in train_paths]), "val": sorted([str(p) for p in val_paths])},
+                f,
+                indent=2,
+            )
+
+        final_train_indices = [i for i, s in enumerate(self.samples) if s.short_path in train_paths]
+        final_val_indices = [i for i, s in enumerate(self.samples) if s.short_path in val_paths]
+
+        train_subset = Subset(self, final_train_indices)
+        val_subset = Subset(self, final_val_indices)
 
         return train_subset, val_subset
 
 
-def _calculate_class_weights(dataset: Dataset, num_classes: int) -> torch.Tensor:
-    """Calculates class weights based on inverse frequency."""
-    labels = [sample.class_index for sample in dataset.samples]
+class DatasetTransformer(Dataset):
+    """Applies a transform to a subset of a dataset."""
+
+    def __init__(self, subset: Subset, transform: transforms.Compose):
+        self.subset = subset
+        self.transform = transform
+
+    def __getitem__(self, index):
+        img, label = self.subset[index]
+        img = self.transform(img)
+        return img, label
+
+    def __len__(self):
+        return len(self.subset)
+
+
+def _calculate_class_weights(dataset: Subset, num_classes: int) -> torch.Tensor:
+    """Calculates class weights based on inverse frequency for a subset of data."""
+    labels = [dataset.dataset.samples[i].class_index for i in dataset.indices]
     class_counts = Counter(labels)
 
     counts = [class_counts.get(i, 0) for i in range(num_classes)]
@@ -307,7 +351,7 @@ def _run_training(
         with Timer("model.train()"):
             model.train()
         running_train_loss = 0.0
-        for inputs_raw, labels_raw in train_loader:
+        for inputs_raw, labels_raw in tqdm(train_loader, desc=f"Epoch {epoch + 1} Training"):
             with Timer("inputs, labels = inputs_raw.to(dev), labels_raw.to(dev)"):
                 inputs, labels = inputs_raw.to(dev), labels_raw.to(dev)
 
@@ -334,7 +378,7 @@ def _run_training(
         running_val_loss = 0.0
         all_preds_epoch, all_labels_epoch = [], []
         with torch.no_grad():
-            for inputs_raw, labels_raw in validation_loader:
+            for inputs_raw, labels_raw in tqdm(validation_loader, desc=f"Epoch {epoch + 1} Validation"):
                 inputs, labels = inputs_raw.to(dev), labels_raw.to(dev)
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
@@ -393,43 +437,46 @@ def train_model(
     loader_workers: int = 8,
     batch_size: int = 128,
     scheduler_mode: SchedulerMode = SchedulerMode.COSINE_ANNEALING,
-    trainable_layers: int = 1,
+    trainable_layers: int = 3,
+    augmentation_strength: float = 1.0,
     *,
     find_lr: bool = False,
     restart_scheduler: bool = False,
 ):
     """Loads data, fine-tunes a pretrained model, and trains with early stopping."""
-    dataset = PreprocessedDataset(data_dir, data_transform)
+    base_dataset = ImageDataset(data_dir)
 
     if not output_dir:
         output_dir = "."
     output_dir = os.path.abspath(os.path.expanduser(output_dir))
     os.makedirs(output_dir, exist_ok=True)
 
-    class_names = dataset.classes
+    class_names = base_dataset.classes
     num_classes = len(class_names)
-    logger.info("Found %d images in %d classes: %s", len(dataset), num_classes, sorted(class_names))
+    logger.info("Found %d images in %d classes: %s", len(base_dataset), num_classes, sorted(class_names))
 
     dev, model = _create_model(num_classes, trainable_layers)
-
-    class_weights = _calculate_class_weights(dataset, num_classes)
-    class_weights = class_weights.to(dev)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
-
-    optimizer = optim.AdamW(model.classifier.parameters(), lr=learning_rate)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
     logger.info("Using device: %s", dev)
 
+    train_subset, val_subset = base_dataset.get_deterministic_split(val_split_ratio=0.2)
+    if not val_subset:
+        logger.error("Validation set is empty. Check your data distribution or split ratio. Aborting.")
+        return
+
+    class_weights = _calculate_class_weights(train_subset, num_classes).to(dev)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+
+    train_transform, val_transform = get_transforms(augmentation_strength)
+
+    train_dataset = DatasetTransformer(train_subset, train_transform)
+    val_dataset = DatasetTransformer(val_subset, val_transform)
+
     if find_lr:
-        train_dataset = dataset
         train_loader = DataLoader(
             train_dataset, batch_size=batch_size, shuffle=True, num_workers=loader_workers, pin_memory=True
         )
         _run_lr_finder(model, optimizer, criterion, dev, train_loader)
-        return
-
-    train_dataset, val_dataset = dataset.get_deterministic_split(val_split_ratio=0.2)
-    if not val_dataset:
-        logger.error("Validation set is empty. Check your data distribution or split ratio. Aborting.")
         return
 
     train_loader = DataLoader(
@@ -452,7 +499,7 @@ def train_model(
             min_lr=1e-6,
         )
     elif scheduler_mode == SchedulerMode.ONECYCLE:
-        steps_per_epoch = len(train_loader) // batch_size
+        steps_per_epoch = len(train_loader)
         scheduler = optim.lr_scheduler.OneCycleLR(
             optimizer, max_lr=learning_rate, steps_per_epoch=steps_per_epoch, epochs=num_epochs
         )
@@ -503,9 +550,10 @@ def train_model(
     )
     print(report)
 
-    with open("class_names.txt", "w") as f:
+    class_names_path = os.path.join(output_dir, "class_names.txt")
+    with open(class_names_path, "w") as f:
         f.write("\n".join(class_names))
-    print("Class names saved to class_names.txt")
+    print(f"Class names saved to {class_names_path}")
 
 
 def main():
@@ -534,13 +582,20 @@ def main():
         help="Do not reload the scheduler/optimizer from the checkpoint.",
     )
     parser.add_argument(
-        "--trainable-layers", "-L", default=1, type=int, help="Number of layers to unfreeze for training."
+        "--trainable-layers", "-L", default=3, type=int, help="Number of layers to unfreeze for training."
+    )
+    parser.add_argument(
+        "--augmentation-strength",
+        "-A",
+        default=1.0,
+        type=float,
+        help="Strength of the image augmentation (0.0 to disable).",
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output.")
     args = parser.parse_args()
 
     log_level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(level=log_level)
+    logging.basicConfig(level=log_level, format="%(asctime)s - %(levelname)s - %(message)s")
 
     data_dir = os.path.abspath(os.path.expanduser(args.data_dir))
 
@@ -555,6 +610,7 @@ def main():
         scheduler_mode=SchedulerMode.from_string(args.scheduler_mode),
         restart_scheduler=args.restart_scheduler,
         trainable_layers=args.trainable_layers,
+        augmentation_strength=args.augmentation_strength,
     )
 
 
