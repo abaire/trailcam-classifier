@@ -93,6 +93,8 @@ async def main():
         "--print-only", action="store_true", help="Print the classification for each file instead of moving them."
     )
     parser.add_argument("--copy", "-c", action="store_true", help="Copy files to outputs instead of moving them.")
+    parser.add_argument("--omit-confidence", action="store_true", help="Do not add model confidence to filenames.")
+    parser.add_argument("--confidence-first", "-F", action="store_true", help="Prefix filenames with model confidence.")
     args = parser.parse_args()
 
     model_path = args.model
@@ -136,7 +138,12 @@ async def main():
         image_path, output_filename, predicted_class, confidence = result
 
         base, ext = os.path.splitext(output_filename)
-        base += f"_C{round(confidence * 100)}"
+        if not args.omit_confidence:
+            confidence_str = f"C{round(confidence * 100)}"
+            if args.confidence_first:
+                base = f"{confidence_str}_{base}"
+            else:
+                base += f"_{confidence_str}"
 
         filename = f"{base}{ext}"
         dest_dir = os.path.join(output_root, predicted_class)
