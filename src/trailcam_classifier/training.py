@@ -133,6 +133,10 @@ def _create_model(num_classes: int) -> tuple[device, EfficientNet]:
     for param in model.features.parameters():
         param.requires_grad = False
 
+    for block in list(model.features.children())[-2:]:
+        for param in block.parameters():
+            param.requires_grad = True
+
     in_features = model.classifier[1].in_features
     model.classifier[1] = nn.Linear(in_features, num_classes)
 
@@ -221,6 +225,8 @@ def _run_training(
 
             running_train_loss += loss.item() * inputs.size(0)
 
+            scheduler.step()
+
         epoch_train_loss = running_train_loss / len(train_loader.dataset)
 
         with Timer("model.eval()"):
@@ -240,7 +246,7 @@ def _run_training(
         epoch_val_loss = running_val_loss / len(validation_loader.dataset)
         accuracy = accuracy_score(all_labels_epoch, all_preds_epoch)
 
-        scheduler.step()
+        # scheduler.step(epoch_val_loss)
         current_lr = scheduler.get_last_lr()[0]
 
         logger.info(
@@ -268,7 +274,7 @@ def _run_training(
         else:
             epochs_without_improvement += 1
 
-        if epochs_without_improvement >= patience:
+        if patience and epochs_without_improvement >= patience:
             logger.info("\nEarly stopping triggered after %d epochs with no improvement.", patience)
             break
 
@@ -282,7 +288,7 @@ def train_model(
     learning_rate: float = 0.0015,
     patience: int = 8,
     loader_workers: int = 8,
-    batch_size: int = 256,
+    batch_size: int = 128,
     *,
     find_lr: bool = False,
 ):
@@ -311,8 +317,6 @@ def train_model(
         _run_lr_finder(model, optimizer, criterion, dev, train_loader)
         return
 
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
-
     train_dataset, val_dataset = dataset.get_deterministic_split(val_split_ratio=0.2)
     if not val_dataset:
         logger.error("Validation set is empty. Check your data distribution or split ratio. Aborting.")
@@ -326,6 +330,18 @@ def train_model(
     )
 
     logger.info("Training on %d images, validating on %d images.", len(train_dataset), len(val_dataset))
+
+    # scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
+    # scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    #     optimizer,
+    #     mode="min",
+    #     factor=0.2,
+    #     patience=patience,
+    #     min_lr=1e-6,
+    # )
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=learning_rate, steps_per_epoch=len(train_loader), epochs=num_epochs
+    )
 
     model_save_path = os.path.join(output_dir, MODEL_SAVE_FILENAME)
     start_epoch, best_val_loss = _load_checkpoint(model_save_path, model, optimizer, scheduler)
@@ -372,7 +388,7 @@ def train_model(
 def main():
     parser = argparse.ArgumentParser(description="Train an image classifier.")
     parser.add_argument("data_dir", type=str, help="Directory containing the classified image folders.")
-    parser.add_argument("--learning-rate", "-L", default=4.0e-3, type=float, help="Initial learning rate")
+    parser.add_argument("--learning-rate", "-L", default=1.0e-3, type=float, help="Initial learning rate")
     parser.add_argument(
         "--find-lr", action="store_true", help="Run the learning rate finder instead of a full training run."
     )
@@ -380,6 +396,7 @@ def main():
     parser.add_argument(
         "--patience", type=int, default=8, help="Maximum number of epochs without improvement before early exit."
     )
+    parser.add_argument("--batch-size", "-b", default=128, type=int, help="Batch size for training.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output.")
     args = parser.parse_args()
 
@@ -392,6 +409,7 @@ def main():
         data_dir=data_dir,
         output_dir=args.output,
         learning_rate=args.learning_rate,
+        batch_size=args.batch_size,
         find_lr=args.find_lr,
         patience=args.patience,
     )
