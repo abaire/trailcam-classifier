@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any
+from typing import Any, Counter
 
 import torch
 from PIL import Image
@@ -184,6 +184,25 @@ class PreprocessedDataset(Dataset):
         return train_subset, val_subset
 
 
+def _calculate_class_weights(dataset: Dataset, num_classes: int) -> torch.Tensor:
+    """Calculates class weights based on inverse frequency."""
+    labels = [sample.class_index for sample in dataset.samples]
+    class_counts = Counter(labels)
+
+    counts = [class_counts.get(i, 0) for i in range(num_classes)]
+
+    total_samples = sum(counts)
+    weights = []
+    for count in counts:
+        if count == 0:
+            weights.append(0)
+        else:
+            weight = total_samples / (num_classes * count)
+            weights.append(weight)
+
+    return torch.tensor(weights, dtype=torch.float)
+
+
 def _run_lr_finder(
     model: EfficientNet,
     optimizer,
@@ -199,15 +218,19 @@ def _run_lr_finder(
     lr_finder.reset()
 
 
-def _create_model(num_classes: int) -> tuple[device, EfficientNet]:
-    model = efficientnet_v2_s(weights=weights)
-
+def _set_trainable_layers(model: EfficientNet, trainable_layers: int):
     for param in model.features.parameters():
         param.requires_grad = False
 
-    for block in list(model.features.children())[-2:]:
+    for block in list(model.features.children())[-trainable_layers:]:
         for param in block.parameters():
             param.requires_grad = True
+
+
+def _create_model(num_classes: int, trainable_layers: int) -> tuple[device, EfficientNet]:
+    model = efficientnet_v2_s(weights=weights)
+
+    _set_trainable_layers(model, trainable_layers)
 
     in_features = model.classifier[1].in_features
     model.classifier[1] = nn.Linear(in_features, num_classes)
@@ -343,7 +366,6 @@ def _run_training(
         if epoch_val_loss < best_val_loss:
             best_val_loss = epoch_val_loss
             epochs_without_improvement = 0
-            # Instead of just weights, we save the entire training state
             best_checkpoint_data = {
                 "epoch": epoch,
                 "model_state_dict": model.state_dict().copy(),
@@ -371,6 +393,7 @@ def train_model(
     loader_workers: int = 8,
     batch_size: int = 128,
     scheduler_mode: SchedulerMode = SchedulerMode.COSINE_ANNEALING,
+    trainable_layers: int = 1,
     *,
     find_lr: bool = False,
     restart_scheduler: bool = False,
@@ -387,9 +410,13 @@ def train_model(
     num_classes = len(class_names)
     logger.info("Found %d images in %d classes: %s", len(dataset), num_classes, sorted(class_names))
 
-    dev, model = _create_model(num_classes)
+    dev, model = _create_model(num_classes, trainable_layers)
+
+    class_weights = _calculate_class_weights(dataset, num_classes)
+    class_weights = class_weights.to(dev)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+
     optimizer = optim.AdamW(model.classifier.parameters(), lr=learning_rate)
-    criterion = nn.CrossEntropyLoss()
     logger.info("Using device: %s", dev)
 
     if find_lr:
@@ -438,6 +465,9 @@ def train_model(
         model_save_path, model, optimizer, scheduler, restart_scheduler=restart_scheduler
     )
 
+    if start_epoch:
+        _set_trainable_layers(model, trainable_layers)
+
     all_labels, all_preds, best_checkpoint = _run_training(
         dev,
         model,
@@ -481,7 +511,7 @@ def train_model(
 def main():
     parser = argparse.ArgumentParser(description="Train an image classifier.")
     parser.add_argument("data_dir", type=str, help="Directory containing the classified image folders.")
-    parser.add_argument("--learning-rate", "-L", default=1.0e-3, type=float, help="Initial learning rate")
+    parser.add_argument("--learning-rate", "-r", default=1.0e-3, type=float, help="Initial learning rate")
     parser.add_argument(
         "--find-lr", action="store_true", help="Run the learning rate finder instead of a full training run."
     )
@@ -503,6 +533,9 @@ def main():
         action="store_true",
         help="Do not reload the scheduler/optimizer from the checkpoint.",
     )
+    parser.add_argument(
+        "--trainable-layers", "-L", default=1, type=int, help="Number of layers to unfreeze for training."
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output.")
     args = parser.parse_args()
 
@@ -521,6 +554,7 @@ def main():
         patience=args.patience,
         scheduler_mode=SchedulerMode.from_string(args.scheduler_mode),
         restart_scheduler=args.restart_scheduler,
+        trainable_layers=args.trainable_layers,
     )
 
 
