@@ -52,20 +52,27 @@ class CropInfoBar:
 
 def get_transforms(
     augmentation_strength: float = 1.0,
-) -> tuple[transforms.Compose, transforms.Compose]:
+) -> tuple[transforms.Compose, transforms.Compose, transforms.Compose]:
     """
-    Returns a tuple of transforms for training and validation.
+    Returns a tuple of transforms for preprocessing, training, and validation.
 
     Augmentation strength parameter scales the intensity of the augmentations.
     """
     normalization = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     crop_size = 384  # From EfficientNetV2-S spec
 
-    train_transform = transforms.Compose(
+    # Deterministic transforms for caching
+    preprocess_transform = transforms.Compose(
         [
             CropInfoBar(),
             transforms.Resize(crop_size, interpolation=transforms.InterpolationMode.BICUBIC),
             transforms.CenterCrop(crop_size),
+        ]
+    )
+
+    # Augmentations applied to the cached images during training
+    train_augment_transform = transforms.Compose(
+        [
             transforms.RandomHorizontalFlip(),
             transforms.ColorJitter(
                 brightness=0.2 * augmentation_strength,
@@ -77,6 +84,7 @@ def get_transforms(
         ]
     )
 
+    # Full set of transforms for validation, to be cached as tensors
     val_transform = transforms.Compose(
         [
             CropInfoBar(),
@@ -87,7 +95,7 @@ def get_transforms(
         ]
     )
 
-    return train_transform, val_transform
+    return preprocess_transform, train_augment_transform, val_transform
 
 
 class SchedulerMode(Enum):
@@ -212,20 +220,120 @@ class ImageDataset(Dataset):
         return train_subset, val_subset
 
 
-class DatasetTransformer(Dataset):
-    """Applies a transform to a subset of a dataset."""
+class CachingPilDataset(Dataset):
+    """
+    A dataset that preprocesses and caches images as PIL Image objects.
 
-    def __init__(self, subset: Subset, transform: transforms.Compose):
+    This dataset wraps a Subset, applies a series of transforms to each image,
+    and saves the result to a cache directory. On subsequent accesses, it loads
+    the preprocessed image from the cache, avoiding repeated transformations.
+    This is useful for caching the deterministic part of a transformation pipeline.
+    """
+
+    def __init__(self, subset: Subset, cache_dir: str | os.PathLike, transform: transforms.Compose):
         self.subset = subset
+        self.cache_dir = Path(cache_dir)
+        self.transform = transform
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        self._precache_images()
+
+    def _precache_images(self):
+        logger.info("Precaching PIL images to %s...", self.cache_dir)
+        for i in tqdm(range(len(self.subset)), desc=f"Caching to {self.cache_dir.name}"):
+            self._cache_item(i)
+
+    def _get_cache_path(self, original_index: int) -> Path:
+        sample_info: ImageDataset.SampleInfo = self.subset.dataset.samples[original_index]
+        relative_path = sample_info.short_path
+        return (self.cache_dir / relative_path).with_suffix(".png")
+
+    def _cache_item(self, index: int):
+        original_index = self.subset.indices[index]
+        cache_path = self._get_cache_path(original_index)
+
+        if not cache_path.exists():
+            image, _ = self.subset.dataset[original_index]  # Load original image
+            image = self.transform(image)
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            image.save(cache_path, format="PNG")
+
+    def __len__(self):
+        return len(self.subset)
+
+    def __getitem__(self, index: int) -> tuple[Image.Image, int]:
+        original_index = self.subset.indices[index]
+        cache_path = self._get_cache_path(original_index)
+
+        image = Image.open(cache_path).convert("RGB")
+        label = self.subset.dataset.samples[original_index].class_index
+        return image, label
+
+
+class CachingTensorDataset(Dataset):
+    """
+    A dataset that preprocesses and caches images as PyTorch Tensors.
+
+    This dataset wraps a Subset, applies a series of transforms to each image,
+    and saves the resulting tensor to a cache directory. On subsequent accesses,
+    it loads the tensor from the cache, avoiding repeated transformations. This
+    is useful for caching a fully deterministic transformation pipeline.
+    """
+
+    def __init__(self, subset: Subset, cache_dir: str | os.PathLike, transform: transforms.Compose):
+        self.subset = subset
+        self.cache_dir = Path(cache_dir)
+        self.transform = transform
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        self._precache_tensors()
+
+    def _precache_tensors(self):
+        logger.info("Precaching tensors to %s...", self.cache_dir)
+        for i in tqdm(range(len(self.subset)), desc=f"Caching to {self.cache_dir.name}"):
+            self._cache_item(i)
+
+    def _get_cache_path(self, original_index: int) -> Path:
+        sample_info: ImageDataset.SampleInfo = self.subset.dataset.samples[original_index]
+        relative_path = sample_info.short_path
+        return (self.cache_dir / relative_path).with_suffix(".pt")
+
+    def _cache_item(self, index: int):
+        original_index = self.subset.indices[index]
+        cache_path = self._get_cache_path(original_index)
+
+        if not cache_path.exists():
+            image, _ = self.subset.dataset[original_index]  # Load original image
+            tensor = self.transform(image)
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(tensor, cache_path)
+
+    def __len__(self):
+        return len(self.subset)
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, int]:
+        original_index = self.subset.indices[index]
+        cache_path = self._get_cache_path(original_index)
+
+        tensor = torch.load(cache_path)
+        label = self.subset.dataset.samples[original_index].class_index
+        return tensor, label
+
+
+class DatasetTransformer(Dataset):
+    """Applies a transform to a dataset."""
+
+    def __init__(self, dataset: Dataset, transform: transforms.Compose):
+        self.dataset = dataset
         self.transform = transform
 
     def __getitem__(self, index):
-        img, label = self.subset[index]
+        img, label = self.dataset[index]
         img = self.transform(img)
         return img, label
 
     def __len__(self):
-        return len(self.subset)
+        return len(self.dataset)
 
 
 def _calculate_class_weights(dataset: Subset, num_classes: int) -> torch.Tensor:
@@ -450,6 +558,7 @@ def train_model(
         output_dir = "."
     output_dir = os.path.abspath(os.path.expanduser(output_dir))
     os.makedirs(output_dir, exist_ok=True)
+    cache_dir = Path(output_dir) / "preprocessed_cache"
 
     class_names = base_dataset.classes
     num_classes = len(class_names)
@@ -467,10 +576,12 @@ def train_model(
     class_weights = _calculate_class_weights(train_subset, num_classes).to(dev)
     criterion = nn.CrossEntropyLoss(weight=class_weights)
 
-    train_transform, val_transform = get_transforms(augmentation_strength)
+    preprocess_transform, train_augment_transform, val_transform = get_transforms(augmentation_strength)
 
-    train_dataset = DatasetTransformer(train_subset, train_transform)
-    val_dataset = DatasetTransformer(val_subset, val_transform)
+    train_pil_dataset = CachingPilDataset(train_subset, cache_dir / "train", preprocess_transform)
+    train_dataset = DatasetTransformer(train_pil_dataset, train_augment_transform)
+
+    val_dataset = CachingTensorDataset(val_subset, cache_dir / "val", val_transform)
 
     if find_lr:
         train_loader = DataLoader(
