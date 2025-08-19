@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 # ruff: noqa: T201 `print` found
+# ruff: noqa: PLR2004 Magic value used in comparison,
 import argparse
 import logging
 import os
@@ -61,21 +62,73 @@ class PreprocessedDataset(Dataset):
         self.class_to_idx = {name: i for i, name in enumerate(self.class_names)}
 
         self.samples = []
+        tensor_parent_paths = set()
         for raw_path, rel_path in zip(self.raw_images, relative_images):
             class_name = rel_path.parts[0]
             class_idx = self.class_to_idx[class_name]
             target_path = raw_path.with_suffix(".pt")
             self.samples.append(PreprocessedDataset.SampleInfo(raw_path, rel_path, target_path, class_idx))
+            tensor_parent_paths.add(os.path.dirname(target_path))
+
+        for parent_path in tensor_parent_paths:
+            os.makedirs(parent_path, exist_ok=True)
+
+        extra_samples: list[PreprocessedDataset.SampleInfo] = []
 
         for sample in tqdm(self.samples, desc="Preprocessing Images"):
-            if sample.tensor_path.is_file():
+            if not sample.tensor_path.is_file():
+                with Image.open(sample.image_path).convert("RGB") as image:
+                    tensor = data_transform(image)
+                    torch.save(tensor, sample.tensor_path)
+
+            dir_name = os.path.dirname(sample.tensor_path)
+            base, ext = os.path.splitext(os.path.basename(sample.tensor_path))
+
+            clipped_tensor_path = os.path.join(dir_name, f"{base}_clip{ext}")
+            flipped_tensor_path = os.path.join(dir_name, f"{base}_clip_flip{ext}")
+
+            needs_clip = not os.path.isfile(clipped_tensor_path)
+            needs_flip = not os.path.isfile(flipped_tensor_path)
+            if not any({needs_clip, needs_flip}):
                 continue
 
-            sample.tensor_path.parent.mkdir(parents=True, exist_ok=True)
+            # Clip off the info bar at the bottom of the image.
+            clip_heights = {
+                1080: 1008,
+                1512: 1411,
+                2376: 2217,
+            }
 
-            image = Image.open(sample.image_path).convert("RGB")
-            tensor = data_transform(image)
-            torch.save(tensor, sample.tensor_path)
+            with Image.open(sample.image_path).convert("RGB") as image:
+                width, height = image.size
+
+                target_height = clip_heights.get(height)
+                if not target_height:
+                    msg = f"Unexpected image height {height} in {sample.image_path}"
+                    raise ValueError(msg)
+
+                crop_box = (0, 0, width, target_height)
+                cropped_img = image.crop(crop_box)
+
+                if needs_clip:
+                    tensor = data_transform(cropped_img)
+                    torch.save(tensor, clipped_tensor_path)
+                    extra_samples.append(
+                        PreprocessedDataset.SampleInfo(
+                            sample.image_path, sample.short_path, Path(clipped_tensor_path), sample.class_index
+                        )
+                    )
+                if needs_flip:
+                    mirrored_img = cropped_img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+                    tensor = data_transform(mirrored_img)
+                    torch.save(tensor, flipped_tensor_path)
+                    extra_samples.append(
+                        PreprocessedDataset.SampleInfo(
+                            sample.image_path, sample.short_path, Path(flipped_tensor_path), sample.class_index
+                        )
+                    )
+
+        self.samples.extend(extra_samples)
 
     @property
     def classes(self) -> list[str]:
@@ -170,6 +223,8 @@ def _load_checkpoint(
     model: EfficientNet,
     optimizer,
     scheduler,
+    *,
+    restart_scheduler: bool = False,
 ) -> tuple[int, float]:
     start_epoch = 0
     best_val_loss = float("inf")
@@ -177,8 +232,9 @@ def _load_checkpoint(
         logger.info("Loading checkpoint from %s", model_save_path)
         checkpoint = torch.load(model_save_path)
         model.load_state_dict(checkpoint["model_state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        if not restart_scheduler:
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         start_epoch = checkpoint["epoch"] + 1
         best_val_loss = float(checkpoint["best_val_loss"])
         logger.info("Resuming training from epoch %d with best val loss %.4f", start_epoch, best_val_loss)
@@ -317,6 +373,7 @@ def train_model(
     scheduler_mode: SchedulerMode = SchedulerMode.COSINE_ANNEALING,
     *,
     find_lr: bool = False,
+    restart_scheduler: bool = False,
 ):
     """Loads data, fine-tunes a pretrained model, and trains with early stopping."""
     dataset = PreprocessedDataset(data_dir, data_transform)
@@ -377,7 +434,9 @@ def train_model(
         raise ValueError(msg)
 
     model_save_path = os.path.join(output_dir, MODEL_SAVE_FILENAME)
-    start_epoch, best_val_loss = _load_checkpoint(model_save_path, model, optimizer, scheduler)
+    start_epoch, best_val_loss = _load_checkpoint(
+        model_save_path, model, optimizer, scheduler, restart_scheduler=restart_scheduler
+    )
 
     all_labels, all_preds, best_checkpoint = _run_training(
         dev,
@@ -438,6 +497,12 @@ def main():
         default="cosine_annealing",
         help="Scheduler type for optimizer.",
     )
+    parser.add_argument(
+        "--restart-scheduler",
+        "-R",
+        action="store_true",
+        help="Do not reload the scheduler/optimizer from the checkpoint.",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output.")
     args = parser.parse_args()
 
@@ -455,6 +520,7 @@ def main():
         find_lr=args.find_lr,
         patience=args.patience,
         scheduler_mode=SchedulerMode.from_string(args.scheduler_mode),
+        restart_scheduler=args.restart_scheduler,
     )
 
 
