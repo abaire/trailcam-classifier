@@ -541,6 +541,7 @@ def train_model(
     output_dir: str | None = None,
     num_epochs: int = 1000,
     learning_rate: float = 0.0015,
+    weight_decay: float = 0.01,
     patience: int = 8,
     loader_workers: int = 8,
     batch_size: int = 128,
@@ -565,7 +566,7 @@ def train_model(
     logger.info("Found %d images in %d classes: %s", len(base_dataset), num_classes, sorted(class_names))
 
     dev, model = _create_model(num_classes, trainable_layers)
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     logger.info("Using device: %s", dev)
 
     train_subset, val_subset = base_dataset.get_deterministic_split(val_split_ratio=0.2)
@@ -671,6 +672,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train an image classifier.")
     parser.add_argument("data_dir", type=str, help="Directory containing the classified image folders.")
     parser.add_argument("--learning-rate", "-r", default=1.0e-3, type=float, help="Initial learning rate")
+    parser.add_argument("--weight-decay", "-w", default=0.01, type=float, help="Weight decay for the AdamW optimizer.")
     parser.add_argument(
         "--find-lr", action="store_true", help="Run the learning rate finder instead of a full training run."
     )
@@ -715,6 +717,7 @@ def main():
         output_dir=args.output,
         num_epochs=args.epochs,
         learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
         batch_size=args.batch_size,
         find_lr=args.find_lr,
         patience=args.patience,
