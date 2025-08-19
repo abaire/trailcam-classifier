@@ -13,3 +13,4 @@ split_artifact.json
 trailcam_classifier_model.pth
 classified_output/
 model/
+preprocessed_cache/
