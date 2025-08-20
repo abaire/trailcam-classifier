@@ -55,7 +55,7 @@ def load_classifier(model_path: str, class_names_path: str):
     return model, class_names, device, transform
 
 
-def predict_image(image_path: str, model, device, transform):
+def predict_image(image_path: str, model, device, transform, top_k: int = 1):
     """Opens an image, preprocesses it, and returns the model's prediction."""
     img = Image.open(image_path).convert("RGB")
 
@@ -67,10 +67,9 @@ def predict_image(image_path: str, model, device, transform):
     with torch.no_grad():
         output = model(img_tensor)
         probabilities = torch.nn.functional.softmax(output[0], dim=0)
-        predicted_idx = torch.argmax(probabilities).item()
-        confidence = probabilities[predicted_idx].item()
+        top_confidences, top_indices = torch.topk(probabilities, top_k)
 
-    return predicted_idx, confidence
+    return top_indices.tolist(), top_confidences.tolist()
 
 
 async def main():
@@ -101,6 +100,7 @@ async def main():
     parser.add_argument("--copy", "-c", action="store_true", help="Copy files to outputs instead of moving them.")
     parser.add_argument("--omit-confidence", action="store_true", help="Do not add model confidence to filenames.")
     parser.add_argument("--confidence-first", "-F", action="store_true", help="Prefix filenames with model confidence.")
+    parser.add_argument("--multiclass", action="store_true", help="Add primary and secondary classes to the filename.")
     args = parser.parse_args()
 
     model_path = args.model
@@ -130,29 +130,40 @@ async def main():
                 filename = f"{timestamp_string}{base}{ext}"
         return image_path, filename
 
-    def _classify(input_data: tuple[Path, str]) -> tuple[Path, str, str, float]:
+    def _classify(input_data: tuple[Path, str]) -> tuple[Path, str, list[tuple[str, float]]]:
         image_path, output_filename = input_data
-        predicted_idx, confidence = predict_image(str(image_path), model, device, transform)
+        num_classes = len(class_names)
+        top_k = 2 if args.multiclass and num_classes > 1 else 1
+        predicted_indices, confidences = predict_image(str(image_path), model, device, transform, top_k=top_k)
 
-        if predicted_idx is None:
+        if not predicted_indices:
             return NO_OUTPUT
 
-        predicted_class = class_names[predicted_idx]
-        return image_path, output_filename, predicted_class, confidence
+        predictions = [(class_names[index], confidences[i]) for i, index in enumerate(predicted_indices)]
+        return image_path, output_filename, predictions
 
-    def _save_output(result: tuple[Path, str, str, float]) -> None:
-        image_path, output_filename, predicted_class, confidence = result
+    def _save_output(result: tuple[Path, str, list[tuple[str, float]]]) -> None:
+        image_path, output_filename, predictions = result
+        primary_class, primary_confidence = predictions[0]
 
         base, ext = os.path.splitext(output_filename)
         if not args.omit_confidence:
-            confidence_str = f"C{round(confidence * 100)}"
+            if args.multiclass and len(predictions) > 1:
+                secondary_class, secondary_confidence = predictions[1]
+                confidence_str = (
+                    f"C{round(primary_confidence * 100)}_{primary_class}_"
+                    f"C{round(secondary_confidence * 100)}_{secondary_class}"
+                )
+            else:
+                confidence_str = f"C{round(primary_confidence * 100)}"
+
             if args.confidence_first:
                 base = f"{confidence_str}_{base}"
             else:
                 base += f"_{confidence_str}"
 
         filename = f"{base}{ext}"
-        dest_dir = os.path.join(output_root, predicted_class)
+        dest_dir = os.path.join(output_root, primary_class)
         dest_path = os.path.join(dest_dir, filename)
 
         counter = 1
@@ -162,13 +173,13 @@ async def main():
             counter += 1
 
         if args.print_only:
-            print(f"mv '{filename}' to '{predicted_class}' (Confidence: {confidence:.2%})")
+            print(f"mv '{filename}' to '{primary_class}' (Confidence: {primary_confidence:.2%})")
         elif args.copy:
             shutil.copy2(image_path, dest_path)
-            print(f"✅ Copied '{filename}' to '{predicted_class}' (Confidence: {confidence:.2%})")
+            print(f"✅ Copied '{filename}' to '{primary_class}' (Confidence: {primary_confidence:.2%})")
         else:
             shutil.move(image_path, dest_path)
-            print(f"✅ Moved '{filename}' to '{predicted_class}' (Confidence: {confidence:.2%})")
+            print(f"✅ Moved '{filename}' to '{primary_class}' (Confidence: {primary_confidence:.2%})")
 
     producer_graph = [
         standard_node(name="augment_filename", transform=_calculate_output_filename, num_workers=4, max_queue_size=128),
