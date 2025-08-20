@@ -24,30 +24,18 @@ from torchvision import transforms
 from torchvision.models import EfficientNet, EfficientNet_V2_S_Weights, efficientnet_v2_s
 from tqdm import tqdm
 
-from trailcam_classifier.util import MODEL_SAVE_FILENAME, find_images, get_best_device
+from trailcam_classifier.util import (
+    MODEL_SAVE_FILENAME,
+    NORMALIZATION,
+    CropInfoBar,
+    find_images,
+    get_best_device,
+    get_classification_transforms,
+)
 
 logger = logging.getLogger(__name__)
 
 weights = EfficientNet_V2_S_Weights.DEFAULT
-
-
-class CropInfoBar:
-    """A transform to clip the info bar off the bottom of an image."""
-
-    def __call__(self, img: Image.Image) -> Image.Image:
-        width, height = img.size
-        clip_heights = {
-            1080: 1008,
-            1512: 1411,
-            2376: 2217,
-        }
-        target_height = clip_heights.get(height)
-        if not target_height:
-            msg = f"Unexpected image height {height}"
-            raise ValueError(msg)
-
-        crop_box = (0, 0, width, target_height)
-        return img.crop(crop_box)
 
 
 def get_transforms(
@@ -58,7 +46,6 @@ def get_transforms(
 
     Augmentation strength parameter scales the intensity of the augmentations.
     """
-    normalization = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     image_size = 384  # From EfficientNetV2-S spec
 
     # Deterministic transforms for caching.
@@ -83,19 +70,12 @@ def get_transforms(
                 saturation=0.2 * augmentation_strength,
             ),
             transforms.ToTensor(),
-            normalization,
+            NORMALIZATION,
         ]
     )
 
     # Full set of transforms for validation, to be cached as tensors
-    val_transform = transforms.Compose(
-        [
-            CropInfoBar(),
-            transforms.Resize((image_size, image_size), interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.ToTensor(),
-            normalization,
-        ]
-    )
+    val_transform = get_classification_transforms()
 
     return preprocess_transform, train_augment_transform, val_transform
 
