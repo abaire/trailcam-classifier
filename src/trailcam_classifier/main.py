@@ -13,9 +13,15 @@ from typing import TYPE_CHECKING
 import torch
 from PIL import Image
 from producer_graph import NO_OUTPUT, Pipeline, standard_node
-from torchvision.models import EfficientNet_V2_S_Weights, efficientnet_v2_s
+from torchvision.models import efficientnet_v2_s
 
-from trailcam_classifier.util import MODEL_SAVE_FILENAME, find_images, get_best_device, get_image_datetime
+from trailcam_classifier.util import (
+    MODEL_SAVE_FILENAME,
+    find_images,
+    get_best_device,
+    get_classification_transforms,
+    get_image_datetime,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -36,8 +42,8 @@ def load_classifier(model_path: str, class_names_path: str):
 
     device = get_best_device()
 
-    weights = EfficientNet_V2_S_Weights.DEFAULT
     model = efficientnet_v2_s(weights=None, num_classes=num_classes)
+    transform = get_classification_transforms()
 
     checkpoint = torch.load(model_path, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -46,7 +52,7 @@ def load_classifier(model_path: str, class_names_path: str):
     model.eval()
 
     print(f"Loaded model and {num_classes} classes. Using device: {device}")
-    return model, class_names, device, weights.transforms()
+    return model, class_names, device, transform
 
 
 def predict_image(image_path: str, model, device, transform):

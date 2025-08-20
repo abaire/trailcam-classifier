@@ -9,10 +9,13 @@ from pathlib import Path
 import torch
 from PIL import Image
 from PIL.ExifTags import TAGS
+from torchvision import transforms
 
 DEFAULT_IMAGE_EXTENSIONS = {"jpg", "jpeg"}
 
 MODEL_SAVE_FILENAME = "trailcam_classifier_model.pth"
+
+NORMALIZATION = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
 
 def get_best_device() -> torch.device:
@@ -74,3 +77,38 @@ def get_image_datetime(image_path) -> datetime | None:
         return None
 
     return datetime.strptime(date_str, "%Y:%m:%d %H:%M:%S")
+
+
+class CropInfoBar:
+    """A transform to clip the info bar off the bottom of an image."""
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        width, height = img.size
+        clip_heights = {
+            1080: 1008,
+            1512: 1411,
+            2376: 2217,
+        }
+        target_height = clip_heights.get(height)
+        if not target_height:
+            msg = f"Unexpected image height {height}"
+            raise ValueError(msg)
+
+        crop_box = (0, 0, width, target_height)
+        return img.crop(crop_box)
+
+
+def get_classification_transforms() -> transforms.Compose:
+    """
+    Returns a composition of transforms for preprocessing an image for classification.
+    """
+    image_size = 384  # From EfficientNetV2-S spec
+
+    return transforms.Compose(
+        [
+            CropInfoBar(),
+            transforms.Resize((image_size, image_size), interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            NORMALIZATION,
+        ]
+    )
