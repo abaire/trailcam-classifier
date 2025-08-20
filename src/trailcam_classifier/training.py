@@ -571,7 +571,9 @@ def train_model(
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     logger.info("Using device: %s", dev)
 
-    train_subset, val_subset = base_dataset.get_deterministic_split(val_split_ratio=0.2)
+    train_subset, val_subset = base_dataset.get_deterministic_split(
+        val_split_ratio=0.2, artifact_path=os.path.join(output_dir, "training_split.json")
+    )
     if not val_subset:
         logger.error("Validation set is empty. Check your data distribution or split ratio. Aborting.")
         return
@@ -674,7 +676,6 @@ def main():
     parser = argparse.ArgumentParser(description="Train an image classifier.")
     parser.add_argument("data_dir", type=str, help="Directory containing the classified image folders.")
     parser.add_argument("--learning-rate", "-r", default=1.0e-3, type=float, help="Initial learning rate")
-    parser.add_argument("--weight-decay", "-w", default=0.01, type=float, help="Weight decay for the AdamW optimizer.")
     parser.add_argument("--weight-decay", "-w", default=0.01, type=float, help="Weight decay for the AdamW optimizer.")
     parser.add_argument(
         "--find-lr", action="store_true", help="Run the learning rate finder instead of a full training run."
