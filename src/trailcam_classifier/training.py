@@ -59,20 +59,23 @@ def get_transforms(
     Augmentation strength parameter scales the intensity of the augmentations.
     """
     normalization = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    crop_size = 384  # From EfficientNetV2-S spec
+    image_size = 384  # From EfficientNetV2-S spec
 
-    # Deterministic transforms for caching
+    # Deterministic transforms for caching.
+    # We resize to a square, which may distort aspect ratio, but guarantees
+    # that the entire image is visible to the model, which is critical for
+    # images where the subject may be small and not in the center.
     preprocess_transform = transforms.Compose(
         [
             CropInfoBar(),
-            transforms.Resize(crop_size, interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.CenterCrop(crop_size),
+            transforms.Resize((image_size, image_size), interpolation=transforms.InterpolationMode.BICUBIC),
         ]
     )
 
     # Augmentations applied to the cached images during training
     train_augment_transform = transforms.Compose(
         [
+            transforms.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=(0.9, 1.1)),
             transforms.RandomHorizontalFlip(),
             transforms.ColorJitter(
                 brightness=0.2 * augmentation_strength,
@@ -88,8 +91,7 @@ def get_transforms(
     val_transform = transforms.Compose(
         [
             CropInfoBar(),
-            transforms.Resize(crop_size, interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.CenterCrop(crop_size),
+            transforms.Resize((image_size, image_size), interpolation=transforms.InterpolationMode.BICUBIC),
             transforms.ToTensor(),
             normalization,
         ]
@@ -672,6 +674,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train an image classifier.")
     parser.add_argument("data_dir", type=str, help="Directory containing the classified image folders.")
     parser.add_argument("--learning-rate", "-r", default=1.0e-3, type=float, help="Initial learning rate")
+    parser.add_argument("--weight-decay", "-w", default=0.01, type=float, help="Weight decay for the AdamW optimizer.")
     parser.add_argument("--weight-decay", "-w", default=0.01, type=float, help="Weight decay for the AdamW optimizer.")
     parser.add_argument(
         "--find-lr", action="store_true", help="Run the learning rate finder instead of a full training run."
