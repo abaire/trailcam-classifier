@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from trailcam_classifier.main import ClassificationConfig, run_classification
+from trailcam_classifier.util import MODEL_SAVE_FILENAME
 
 
 class SettingsDialog(QDialog):
@@ -36,12 +37,24 @@ class SettingsDialog(QDialog):
         output_dir_label = QLabel("Output Directory:")
         self.output_dir_edit = QLineEdit()
         self.output_dir_edit.setText(self.settings.value("output_directory", "classified_output"))
-        browse_button = QPushButton("Browse...")
-        browse_button.clicked.connect(self.browse_output_directory)
+        browse_output_button = QPushButton("Browse...")
+        browse_output_button.clicked.connect(self.browse_output_directory)
         output_dir_layout.addWidget(output_dir_label)
         output_dir_layout.addWidget(self.output_dir_edit)
-        output_dir_layout.addWidget(browse_button)
+        output_dir_layout.addWidget(browse_output_button)
         layout.addLayout(output_dir_layout)
+
+        # Model path
+        model_path_layout = QHBoxLayout()
+        model_path_label = QLabel("Model Path:")
+        self.model_path_edit = QLineEdit()
+        self.model_path_edit.setText(self.settings.value("model_path", MODEL_SAVE_FILENAME))
+        browse_model_button = QPushButton("Browse...")
+        browse_model_button.clicked.connect(self.browse_model_path)
+        model_path_layout.addWidget(model_path_label)
+        model_path_layout.addWidget(self.model_path_edit)
+        model_path_layout.addWidget(browse_model_button)
+        layout.addLayout(model_path_layout)
 
         # Save and Cancel buttons
         button_layout = QHBoxLayout()
@@ -58,8 +71,14 @@ class SettingsDialog(QDialog):
         if directory:
             self.output_dir_edit.setText(directory)
 
+    def browse_model_path(self):
+        filepath, _ = QFileDialog.getOpenFileName(self, "Select Model File", filter="PyTorch Models (*.pth)")
+        if filepath:
+            self.model_path_edit.setText(filepath)
+
     def accept(self):
         self.settings.setValue("output_directory", self.output_dir_edit.text())
+        self.settings.setValue("model_path", self.model_path_edit.text())
         super().accept()
 
 
@@ -174,8 +193,9 @@ class MainWindow(QMainWindow):
         self.log(f"Starting classification for folder: {folder_path}")
 
         output_directory = self.settings.value("output_directory", "classified_output")
+        model_path = self.settings.value("model_path", MODEL_SAVE_FILENAME)
 
-        config = ClassificationConfig(dirs=[folder_path], output=output_directory)
+        config = ClassificationConfig(dirs=[folder_path], output=output_directory, model=model_path)
         self.thread = QThread()
         self.worker = Worker(config)
         self.worker.moveToThread(self.thread)
@@ -191,7 +211,7 @@ class MainWindow(QMainWindow):
 
 def run_gui():
     QApplication.setOrganizationName("BearBrains")
-    QApplication.setApplicationName("trailcam-classifier")
+    QApplication.setApplicationName("Trailcam Classifier")
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
