@@ -8,7 +8,8 @@ import asyncio
 import os
 import shutil
 import sys
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Callable
 
 import torch
 from PIL import Image
@@ -27,14 +28,28 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def load_classifier(model_path: str, class_names_path: str):
+@dataclass
+class ClassificationConfig:
+    """Configuration for the classification process."""
+
+    dirs: list[str]
+    model: str = MODEL_SAVE_FILENAME
+    output: str = "classified_output"
+    print_only: bool = False
+    copy: bool = False
+    omit_confidence: bool = False
+    confidence_first: bool = False
+    multiclass: bool = False
+
+
+def load_classifier(model_path: str, class_names_path: str, logger: Callable[[str], None] = print):
     """Loads the fine-tuned model and corresponding class names."""
     if not os.path.exists(model_path):
-        print(f"Error: Model file not found at {model_path}", file=sys.stderr)
-        sys.exit(1)
+        logger(f"Error: Model file not found at {model_path}")
+        return None, None, None, None
     if not os.path.exists(class_names_path):
-        print(f"Error: Class names file not found at {class_names_path}", file=sys.stderr)
-        sys.exit(1)
+        logger(f"Error: Class names file not found at {class_names_path}")
+        return None, None, None, None
 
     with open(class_names_path) as f:
         class_names = [line.strip() for line in f]
@@ -51,7 +66,7 @@ def load_classifier(model_path: str, class_names_path: str):
     model.to(device)
     model.eval()
 
-    print(f"Loaded model and {num_classes} classes. Using device: {device}")
+    logger(f"Loaded model and {num_classes} classes. Using device: {device}")
     return model, class_names, device, transform
 
 
@@ -70,6 +85,114 @@ def predict_image(image_path: str, model, device, transform, top_k: int = 1):
         top_confidences, top_indices = torch.topk(probabilities, top_k)
 
     return top_indices.tolist(), top_confidences.tolist()
+
+
+async def run_classification(config: ClassificationConfig, logger: Callable[[str], None] = print):
+    """Runs the image classification process."""
+    model_path = config.model
+    class_names_path = os.path.join(os.path.dirname(model_path), "class_names.txt")
+    output_root = os.path.abspath(os.path.expanduser(config.output))
+
+    model, class_names, device, transform = load_classifier(model_path, class_names_path, logger)
+    if not model:
+        return 1
+
+    for name in class_names:
+        os.makedirs(os.path.join(output_root, name), exist_ok=True)
+
+    logger(f"Looking for images in dirs {config.dirs}")
+    image_paths = find_images(config.dirs, [config.output])
+    if not image_paths:
+        logger("No images found to classify.")
+        return 0
+
+    logger(f"\nFound {len(image_paths)} images. Starting classification...")
+
+    def _calculate_output_filename(image_path: Path) -> tuple[Path, str]:
+        filename = os.path.basename(image_path)
+        date_taken = get_image_datetime(image_path)
+        if date_taken:
+            base, ext = os.path.splitext(filename)
+            timestamp_string = f"{date_taken.strftime('%Y%m%d-%H%M%S')}_"
+            if not filename.startswith(timestamp_string):
+                filename = f"{timestamp_string}{base}{ext}"
+        return image_path, filename
+
+    def _classify(input_data: tuple[Path, str]) -> tuple[Path, str, list[tuple[str, float]]]:
+        image_path, output_filename = input_data
+        num_classes = len(class_names)
+        top_k = 2 if config.multiclass and num_classes > 1 else 1
+        predicted_indices, confidences = predict_image(str(image_path), model, device, transform, top_k=top_k)
+
+        if not predicted_indices:
+            return NO_OUTPUT
+
+        predictions = [(class_names[index], confidences[i]) for i, index in enumerate(predicted_indices)]
+        return image_path, output_filename, predictions
+
+    def _save_output(result: tuple[Path, str, list[tuple[str, float]]]) -> None:
+        image_path, output_filename, predictions = result
+        primary_class, primary_confidence = predictions[0]
+
+        base, ext = os.path.splitext(output_filename)
+        if not config.omit_confidence:
+            if config.multiclass and len(predictions) > 1:
+                secondary_class, secondary_confidence = predictions[1]
+                confidence_str = (
+                    f"C{round(primary_confidence * 100)}_{primary_class}_"
+                    f"C{round(secondary_confidence * 100)}_{secondary_class}"
+                )
+            else:
+                confidence_str = f"C{round(primary_confidence * 100)}"
+
+            if config.confidence_first:
+                base = f"{confidence_str}_{base}"
+            else:
+                base += f"_{confidence_str}"
+
+        filename = f"{base}{ext}"
+        dest_dir = os.path.join(output_root, primary_class)
+        dest_path = os.path.join(dest_dir, filename)
+
+        counter = 1
+        while os.path.exists(dest_path):
+            filename = f"{base}_{counter}{ext}"
+            dest_path = os.path.join(dest_dir, filename)
+            counter += 1
+
+        if config.print_only:
+            logger(f"mv '{filename}' to '{primary_class}' (Confidence: {primary_confidence:.2%})")
+        elif config.copy:
+            shutil.copy2(image_path, dest_path)
+            logger(f"✅ Copied '{filename}' to '{primary_class}' (Confidence: {primary_confidence:.2%})")
+        else:
+            shutil.move(image_path, dest_path)
+            logger(f"✅ Moved '{filename}' to '{primary_class}' (Confidence: {primary_confidence:.2%})")
+
+    producer_graph = [
+        standard_node(name="augment_filename", transform=_calculate_output_filename, num_workers=4, max_queue_size=128),
+        standard_node(
+            name="classify",
+            transform=_classify,
+            spawn_thread=True,
+            num_workers=1,
+            max_queue_size=1000,
+            input_node="augment_filename",
+        ),
+        standard_node(
+            name="save_output",
+            transform=_save_output,
+            spawn_thread=True,
+            num_workers=2,
+            max_queue_size=100,
+            input_node="classify",
+        ),
+    ]
+
+    pipeline = Pipeline(producer_graph)
+    await pipeline.run(image_paths)
+
+    return 0
 
 
 async def main():
@@ -103,109 +226,23 @@ async def main():
     parser.add_argument("--multiclass", action="store_true", help="Add primary and secondary classes to the filename.")
     args = parser.parse_args()
 
-    model_path = args.model
-    class_names_path = os.path.join(os.path.dirname(model_path), "class_names.txt")
-    output_root = os.path.abspath(os.path.expanduser(args.output))
+    config = ClassificationConfig(
+        dirs=args.dirs,
+        model=args.model,
+        output=args.output,
+        print_only=args.print_only,
+        copy=args.copy,
+        omit_confidence=args.omit_confidence,
+        confidence_first=args.confidence_first,
+        multiclass=args.multiclass,
+    )
+    return await run_classification(config)
 
-    model, class_names, device, transform = load_classifier(model_path, class_names_path)
 
-    for name in class_names:
-        os.makedirs(os.path.join(output_root, name), exist_ok=True)
-
-    print(f"Looking for images in dirs {args.dirs}")
-    image_paths = find_images(args.dirs, [args.output])
-    if not image_paths:
-        print("No images found to classify.")
-        return 0
-
-    print(f"\nFound {len(image_paths)} images. Starting classification...")
-
-    def _calculate_output_filename(image_path: Path) -> tuple[Path, str]:
-        filename = os.path.basename(image_path)
-        date_taken = get_image_datetime(image_path)
-        if date_taken:
-            base, ext = os.path.splitext(filename)
-            timestamp_string = f"{date_taken.strftime('%Y%m%d-%H%M%S')}_"
-            if not filename.startswith(timestamp_string):
-                filename = f"{timestamp_string}{base}{ext}"
-        return image_path, filename
-
-    def _classify(input_data: tuple[Path, str]) -> tuple[Path, str, list[tuple[str, float]]]:
-        image_path, output_filename = input_data
-        num_classes = len(class_names)
-        top_k = 2 if args.multiclass and num_classes > 1 else 1
-        predicted_indices, confidences = predict_image(str(image_path), model, device, transform, top_k=top_k)
-
-        if not predicted_indices:
-            return NO_OUTPUT
-
-        predictions = [(class_names[index], confidences[i]) for i, index in enumerate(predicted_indices)]
-        return image_path, output_filename, predictions
-
-    def _save_output(result: tuple[Path, str, list[tuple[str, float]]]) -> None:
-        image_path, output_filename, predictions = result
-        primary_class, primary_confidence = predictions[0]
-
-        base, ext = os.path.splitext(output_filename)
-        if not args.omit_confidence:
-            if args.multiclass and len(predictions) > 1:
-                secondary_class, secondary_confidence = predictions[1]
-                confidence_str = (
-                    f"C{round(primary_confidence * 100)}_{primary_class}_"
-                    f"C{round(secondary_confidence * 100)}_{secondary_class}"
-                )
-            else:
-                confidence_str = f"C{round(primary_confidence * 100)}"
-
-            if args.confidence_first:
-                base = f"{confidence_str}_{base}"
-            else:
-                base += f"_{confidence_str}"
-
-        filename = f"{base}{ext}"
-        dest_dir = os.path.join(output_root, primary_class)
-        dest_path = os.path.join(dest_dir, filename)
-
-        counter = 1
-        while os.path.exists(dest_path):
-            filename = f"{base}_{counter}{ext}"
-            dest_path = os.path.join(dest_dir, filename)
-            counter += 1
-
-        if args.print_only:
-            print(f"mv '{filename}' to '{primary_class}' (Confidence: {primary_confidence:.2%})")
-        elif args.copy:
-            shutil.copy2(image_path, dest_path)
-            print(f"✅ Copied '{filename}' to '{primary_class}' (Confidence: {primary_confidence:.2%})")
-        else:
-            shutil.move(image_path, dest_path)
-            print(f"✅ Moved '{filename}' to '{primary_class}' (Confidence: {primary_confidence:.2%})")
-
-    producer_graph = [
-        standard_node(name="augment_filename", transform=_calculate_output_filename, num_workers=4, max_queue_size=128),
-        standard_node(
-            name="classify",
-            transform=_classify,
-            spawn_thread=True,
-            num_workers=1,
-            max_queue_size=1000,
-            input_node="augment_filename",
-        ),
-        standard_node(
-            name="save_output",
-            transform=_save_output,
-            spawn_thread=True,
-            num_workers=2,
-            max_queue_size=100,
-            input_node="classify",
-        ),
-    ]
-
-    pipeline = Pipeline(producer_graph)
-    await pipeline.run(image_paths)
-
-    return 0
+def run():
+    """Entry point for the `trailcamclassify` script."""
+    sys.exit(asyncio.run(main()))
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    run()
