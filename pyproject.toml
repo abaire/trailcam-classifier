@@ -29,11 +29,14 @@ dependencies = [
     "torch_lr_finder~=0.2.2",
     "tqdm~=4.67.1",
     "producer-graph @ git+https://github.com/abaire/py-producer-graph.git",
+    "PySide6",
+    "pyinstaller",
 ]
 
 [project.scripts]
-trailcamclassify = "trailcam_classifier:run"
-trailcamclassify-train = "trailcam_classifier:train"
+trailcamclassify = "trailcam_classifier.main:run"
+trailcamclassify-train = "trailcam_classifier.training:main"
+trailcamclassify-gui = "trailcam_classifier.gui:run_gui"
 
 
 [project.urls]
