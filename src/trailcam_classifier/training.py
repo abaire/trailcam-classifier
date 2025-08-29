@@ -31,6 +31,7 @@ from trailcam_classifier.util import (
     find_images,
     get_best_device,
     get_classification_transforms,
+    slice_with_feature,
 )
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,13 @@ class ImageDataset(Dataset):
     def __getitem__(self, idx) -> tuple[Any, int]:
         sample: ImageDataset.SampleInfo = self.samples[idx]
         image = Image.open(sample.image_path).convert("RGB")
+
+        json_path = sample.image_path.with_suffix(".json")
+        if json_path.exists():
+            with json_path.open() as f:
+                feature_coords = json.load(f)
+            image = slice_with_feature(image, feature_coords)
+
         return image, sample.class_index
 
     def get_deterministic_split(self, val_split_ratio: float, artifact_path: str = "split_artifact.json"):

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 # ruff: noqa: DTZ007 Naive datetime constructed using `datetime.datetime.strptime()` without %z
+# ruff: noqa: S311 Standard pseudo-random generators are not suitable for cryptographic purposes
 import itertools
 import os
+import random
 from datetime import datetime
 from pathlib import Path
 
@@ -112,3 +114,45 @@ def get_classification_transforms() -> transforms.Compose:
             NORMALIZATION,
         ]
     )
+
+
+def slice_with_feature(img: Image.Image, feature_coords: dict[str, int]) -> Image.Image:
+    """
+    Slices the image to a random new size, ensuring that at least 50% of
+    the feature is visible.
+    """
+    img_width, img_height = img.size
+    x1, y1, x2, y2 = (
+        feature_coords["x1"],
+        feature_coords["y1"],
+        feature_coords["x2"],
+        feature_coords["y2"],
+    )
+
+    feature_width = x2 - x1
+    feature_height = y2 - y1
+
+    if feature_width <= 0 or feature_height <= 0:
+        return img
+
+    # 1. Determine the minimum required overlap dimensions (e.g., sqrt(0.5))
+    min_overlap_width = int(feature_width * 0.707)
+    min_overlap_height = int(feature_height * 0.707)
+
+    # 2. Choose a random actual overlap size, between minimum and full feature.
+    overlap_w = random.randint(min_overlap_width, feature_width)
+    overlap_h = random.randint(min_overlap_height, feature_height)
+
+    # 3. Randomly place this overlap box within the feature area.
+    overlap_x1 = random.randint(x1, x2 - overlap_w)
+    overlap_y1 = random.randint(y1, y2 - overlap_h)
+    overlap_x2 = overlap_x1 + overlap_w
+    overlap_y2 = overlap_y1 + overlap_h
+
+    # 4. Randomly define the crop box boundaries, making sure it contains the overlap box.
+    crop_x1 = random.randint(0, overlap_x1)
+    crop_y1 = random.randint(0, overlap_y1)
+    crop_x2 = random.randint(overlap_x2, img_width)
+    crop_y2 = random.randint(overlap_y2, img_height)
+
+    return img.crop((crop_x1, crop_y1, crop_x2, crop_y2))
