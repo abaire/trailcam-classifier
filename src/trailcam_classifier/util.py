@@ -11,13 +11,11 @@ from pathlib import Path
 import torch
 from PIL import Image
 from PIL.ExifTags import TAGS
-from torchvision import transforms
+from torchvision.transforms import v2 as T
 
 DEFAULT_IMAGE_EXTENSIONS = {"jpg", "jpeg"}
 
 MODEL_SAVE_FILENAME = "trailcam_classifier_model.pth"
-
-NORMALIZATION = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
 
 def get_best_device() -> torch.device:
@@ -100,59 +98,14 @@ class CropInfoBar:
         return img.crop(crop_box)
 
 
-def get_classification_transforms() -> transforms.Compose:
+def get_object_detection_transforms(train: bool, augmentation_strength: float = 1.0):
     """
-    Returns a composition of transforms for preprocessing an image for classification.
+    Returns a composition of transforms for preprocessing an image for object detection.
     """
-    image_size = 384  # From EfficientNetV2-S spec
+    transforms = []
+    transforms.append(T.ToDtype(torch.float, scale=True))
+    transforms.append(T.ToPureTensor())
+    if train:
+        transforms.append(T.RandomHorizontalFlip(0.5))
 
-    return transforms.Compose(
-        [
-            CropInfoBar(),
-            transforms.Resize((image_size, image_size), interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.ToTensor(),
-            NORMALIZATION,
-        ]
-    )
-
-
-def slice_with_feature(img: Image.Image, feature_coords: dict[str, int]) -> Image.Image:
-    """
-    Slices the image to a random new size, ensuring that at least 50% of
-    the feature is visible.
-    """
-    img_width, img_height = img.size
-    x1, y1, x2, y2 = (
-        feature_coords["x1"],
-        feature_coords["y1"],
-        feature_coords["x2"],
-        feature_coords["y2"],
-    )
-
-    feature_width = x2 - x1
-    feature_height = y2 - y1
-
-    if feature_width <= 0 or feature_height <= 0:
-        return img
-
-    # 1. Determine the minimum required overlap dimensions (e.g., sqrt(0.5))
-    min_overlap_width = int(feature_width * 0.707)
-    min_overlap_height = int(feature_height * 0.707)
-
-    # 2. Choose a random actual overlap size, between minimum and full feature.
-    overlap_w = random.randint(min_overlap_width, feature_width)
-    overlap_h = random.randint(min_overlap_height, feature_height)
-
-    # 3. Randomly place this overlap box within the feature area.
-    overlap_x1 = random.randint(x1, x2 - overlap_w)
-    overlap_y1 = random.randint(y1, y2 - overlap_h)
-    overlap_x2 = overlap_x1 + overlap_w
-    overlap_y2 = overlap_y1 + overlap_h
-
-    # 4. Randomly define the crop box boundaries, making sure it contains the overlap box.
-    crop_x1 = random.randint(0, overlap_x1)
-    crop_y1 = random.randint(0, overlap_y1)
-    crop_x2 = random.randint(overlap_x2, img_width)
-    crop_y2 = random.randint(overlap_y2, img_height)
-
-    return img.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+    return T.Compose(transforms)

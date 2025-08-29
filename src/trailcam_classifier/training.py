@@ -12,73 +12,28 @@ import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Counter
+from typing import Any
 
 import torch
 from PIL import Image
-from sklearn.metrics import accuracy_score, classification_report
 from torch import device, nn, optim
 from torch.utils.data import DataLoader, Dataset, Subset, random_split
-from torch_lr_finder import LRFinder
-from torchvision import transforms
-from torchvision.models import EfficientNet, EfficientNet_V2_S_Weights, efficientnet_v2_s
+from torchvision import tv_tensors
+from torchvision.models.detection import (
+    fasterrcnn_mobilenet_v3_large_fpn,
+    FasterRCNN_MobileNet_V3_Large_FPN_Weights,
+)
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from tqdm import tqdm
 
 from trailcam_classifier.util import (
     MODEL_SAVE_FILENAME,
-    NORMALIZATION,
-    CropInfoBar,
     find_images,
     get_best_device,
-    get_classification_transforms,
-    slice_with_feature,
+    get_object_detection_transforms,
 )
 
 logger = logging.getLogger(__name__)
-
-weights = EfficientNet_V2_S_Weights.DEFAULT
-
-
-def get_transforms(
-    augmentation_strength: float = 1.0,
-) -> tuple[transforms.Compose, transforms.Compose, transforms.Compose]:
-    """
-    Returns a tuple of transforms for preprocessing, training, and validation.
-
-    Augmentation strength parameter scales the intensity of the augmentations.
-    """
-    image_size = 384  # From EfficientNetV2-S spec
-
-    # Deterministic transforms for caching.
-    # We resize to a square, which may distort aspect ratio, but guarantees
-    # that the entire image is visible to the model, which is critical for
-    # images where the subject may be small and not in the center.
-    preprocess_transform = transforms.Compose(
-        [
-            CropInfoBar(),
-            transforms.Resize((image_size, image_size), interpolation=transforms.InterpolationMode.BICUBIC),
-        ]
-    )
-
-    # Augmentations applied to the cached images during training
-    train_augment_transform = transforms.Compose(
-        [
-            transforms.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=(0.9, 1.1)),
-            transforms.RandomHorizontalFlip(),
-            transforms.ColorJitter(
-                brightness=0.2 * augmentation_strength,
-                contrast=0.2 * augmentation_strength,
-                saturation=0.2 * augmentation_strength,
-            ),
-            transforms.ToTensor(),
-            NORMALIZATION,
-        ]
-    )
-
-    # Full set of transforms for validation, to be cached as tensors
-    val_transform = get_classification_transforms()
-
-    return preprocess_transform, train_augment_transform, val_transform
 
 
 class SchedulerMode(Enum):
@@ -104,21 +59,30 @@ class ImageDataset(Dataset):
     class SampleInfo:
         image_path: Path
         short_path: Path
-        class_index: int
 
     def __init__(self, root_dir: str | os.PathLike):
         self.root_dir = Path(root_dir)
         self.raw_images = find_images([self.root_dir])
         relative_images = [image.relative_to(self.root_dir) for image in self.raw_images]
 
-        self.class_names = sorted({image_file.parts[0] for image_file in relative_images})
-        self.class_to_idx = {name: i for i, name in enumerate(self.class_names)}
-
         self.samples = []
         for raw_path, rel_path in zip(self.raw_images, relative_images):
-            class_name = rel_path.parts[0]
-            class_idx = self.class_to_idx[class_name]
-            self.samples.append(ImageDataset.SampleInfo(raw_path, rel_path, class_idx))
+            self.samples.append(ImageDataset.SampleInfo(raw_path, rel_path))
+
+        # Discover classes from JSON files
+        self.class_names = self._discover_classes()
+        self.class_to_idx = {name: i + 1 for i, name in enumerate(self.class_names)}  # 0 is background
+
+    def _discover_classes(self) -> list[str]:
+        """Scans all JSON files to find the set of all class names."""
+        class_names = set()
+        for sample in tqdm(self.samples, desc="Discovering classes"):
+            json_path = sample.image_path.with_suffix(".json")
+            if json_path.exists():
+                with json_path.open() as f:
+                    data = json.load(f)
+                    class_names.update(data.keys())
+        return sorted(list(class_names))
 
     @property
     def classes(self) -> list[str]:
@@ -127,27 +91,49 @@ class ImageDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
-    def __getitem__(self, idx) -> tuple[Any, int]:
+    def __getitem__(self, idx) -> tuple[Any, dict[str, Any]]:
         sample: ImageDataset.SampleInfo = self.samples[idx]
         image = Image.open(sample.image_path).convert("RGB")
-
         json_path = sample.image_path.with_suffix(".json")
+
+        boxes = []
+        labels = []
         if json_path.exists():
             with json_path.open() as f:
-                feature_coords = json.load(f)
-            image = slice_with_feature(image, feature_coords)
+                annotations = json.load(f)
+            for class_name, regions in annotations.items():
+                for region in regions:
+                    boxes.append([region["x1"], region["y1"], region["x2"], region["y2"]])
+                    labels.append(self.class_to_idx[class_name])
 
-        return image, sample.class_index
+        image = tv_tensors.Image(image)
+
+        target = {}
+        if boxes:
+            target["boxes"] = tv_tensors.BoundingBoxes(
+                boxes, format="XYXY", canvas_size=image.size, dtype=torch.float32
+            )
+            target["labels"] = torch.as_tensor(labels, dtype=torch.int64)
+            target["image_id"] = torch.tensor([idx])
+            target["area"] = (target["boxes"][:, 3] - target["boxes"][:, 1]) * (
+                target["boxes"][:, 2] - target["boxes"][:, 0]
+            )
+            target["iscrowd"] = torch.zeros((len(boxes),), dtype=torch.int64)
+        else:
+            # Handle images with no objects
+            target["boxes"] = tv_tensors.BoundingBoxes(
+                torch.zeros((0, 4)), format="XYXY", canvas_size=image.size, dtype=torch.float32
+            )
+            target["labels"] = torch.zeros(0, dtype=torch.int64)
+            target["image_id"] = torch.tensor([idx])
+            target["area"] = torch.zeros(0, dtype=torch.float32)
+            target["iscrowd"] = torch.zeros((0,), dtype=torch.int64)
+
+        return image, target
 
     def get_deterministic_split(self, val_split_ratio: float, artifact_path: str = "split_artifact.json"):
         """
         Creates a deterministic train/validation split that is stable across runs.
-
-        If an artifact file exists, it loads the split from there. Any new files
-        not in the artifact are split and added to the existing sets, and the
-        artifact is updated.
-
-        If no artifact exists, a new split is created and saved.
         """
         if os.path.exists(artifact_path):
             logger.info("Loading train/val split from artifact: %s", artifact_path)
@@ -210,172 +196,32 @@ class ImageDataset(Dataset):
         return train_subset, val_subset
 
 
-class CachingPilDataset(Dataset):
-    """
-    A dataset that preprocesses and caches images as PIL Image objects.
-
-    This dataset wraps a Subset, applies a series of transforms to each image,
-    and saves the result to a cache directory. On subsequent accesses, it loads
-    the preprocessed image from the cache, avoiding repeated transformations.
-    This is useful for caching the deterministic part of a transformation pipeline.
-    """
-
-    def __init__(self, subset: Subset, cache_dir: str | os.PathLike, transform: transforms.Compose):
-        self.subset = subset
-        self.cache_dir = Path(cache_dir)
-        self.transform = transform
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-        self._precache_images()
-
-    def _precache_images(self):
-        logger.info("Precaching PIL images to %s...", self.cache_dir)
-        for i in tqdm(range(len(self.subset)), desc=f"Caching to {self.cache_dir.name}"):
-            self._cache_item(i)
-
-    def _get_cache_path(self, original_index: int) -> Path:
-        sample_info: ImageDataset.SampleInfo = self.subset.dataset.samples[original_index]
-        relative_path = sample_info.short_path
-        return (self.cache_dir / relative_path).with_suffix(".png")
-
-    def _cache_item(self, index: int):
-        original_index = self.subset.indices[index]
-        cache_path = self._get_cache_path(original_index)
-
-        if not cache_path.exists():
-            image, _ = self.subset.dataset[original_index]  # Load original image
-            image = self.transform(image)
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            image.save(cache_path, format="PNG")
-
-    def __len__(self):
-        return len(self.subset)
-
-    def __getitem__(self, index: int) -> tuple[Image.Image, int]:
-        original_index = self.subset.indices[index]
-        cache_path = self._get_cache_path(original_index)
-
-        image = Image.open(cache_path).convert("RGB")
-        label = self.subset.dataset.samples[original_index].class_index
-        return image, label
-
-
-class CachingTensorDataset(Dataset):
-    """
-    A dataset that preprocesses and caches images as PyTorch Tensors.
-
-    This dataset wraps a Subset, applies a series of transforms to each image,
-    and saves the resulting tensor to a cache directory. On subsequent accesses,
-    it loads the tensor from the cache, avoiding repeated transformations. This
-    is useful for caching a fully deterministic transformation pipeline.
-    """
-
-    def __init__(self, subset: Subset, cache_dir: str | os.PathLike, transform: transforms.Compose):
-        self.subset = subset
-        self.cache_dir = Path(cache_dir)
-        self.transform = transform
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-
-        self._precache_tensors()
-
-    def _precache_tensors(self):
-        logger.info("Precaching tensors to %s...", self.cache_dir)
-        for i in tqdm(range(len(self.subset)), desc=f"Caching to {self.cache_dir.name}"):
-            self._cache_item(i)
-
-    def _get_cache_path(self, original_index: int) -> Path:
-        sample_info: ImageDataset.SampleInfo = self.subset.dataset.samples[original_index]
-        relative_path = sample_info.short_path
-        return (self.cache_dir / relative_path).with_suffix(".pt")
-
-    def _cache_item(self, index: int):
-        original_index = self.subset.indices[index]
-        cache_path = self._get_cache_path(original_index)
-
-        if not cache_path.exists():
-            image, _ = self.subset.dataset[original_index]  # Load original image
-            tensor = self.transform(image)
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(tensor, cache_path)
-
-    def __len__(self):
-        return len(self.subset)
-
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, int]:
-        original_index = self.subset.indices[index]
-        cache_path = self._get_cache_path(original_index)
-
-        tensor = torch.load(cache_path)
-        label = self.subset.dataset.samples[original_index].class_index
-        return tensor, label
-
-
 class DatasetTransformer(Dataset):
     """Applies a transform to a dataset."""
 
-    def __init__(self, dataset: Dataset, transform: transforms.Compose):
+    def __init__(self, dataset: Dataset, transform):
         self.dataset = dataset
         self.transform = transform
 
     def __getitem__(self, index):
-        img, label = self.dataset[index]
-        img = self.transform(img)
-        return img, label
+        img, target = self.dataset[index]
+        if self.transform:
+            img, target = self.transform(img, target)
+        return img, target
 
     def __len__(self):
         return len(self.dataset)
 
 
-def _calculate_class_weights(dataset: Subset, num_classes: int) -> torch.Tensor:
-    """Calculates class weights based on inverse frequency for a subset of data."""
-    labels = [dataset.dataset.samples[i].class_index for i in dataset.indices]
-    class_counts = Counter(labels)
+def _create_model(num_classes: int) -> tuple[device, nn.Module]:
+    # load a model pre-trained on COCO
+    weights = FasterRCNN_MobileNet_V3_Large_FPN_Weights.DEFAULT
+    model = fasterrcnn_mobilenet_v3_large_fpn(weights=weights)
 
-    counts = [class_counts.get(i, 0) for i in range(num_classes)]
-
-    total_samples = sum(counts)
-    weights = []
-    for count in counts:
-        if count == 0:
-            weights.append(0)
-        else:
-            weight = total_samples / (num_classes * count)
-            weights.append(weight)
-
-    return torch.tensor(weights, dtype=torch.float)
-
-
-def _run_lr_finder(
-    model: EfficientNet,
-    optimizer,
-    criterion,
-    device: device,
-    train_loader: DataLoader,
-):
-    """Runs the learning rate finder, plots the results, and suggests a rate."""
-    lr_finder = LRFinder(model, optimizer, criterion, device=device)
-    lr_finder.range_test(train_loader, end_lr=100, num_iter=100)
-    lr_finder.plot(log_lr=True)
-
-    lr_finder.reset()
-
-
-def _set_trainable_layers(model: EfficientNet, trainable_layers: int):
-    for param in model.features.parameters():
-        param.requires_grad = False
-
-    for block in list(model.features.children())[-trainable_layers:]:
-        for param in block.parameters():
-            param.requires_grad = True
-
-
-def _create_model(num_classes: int, trainable_layers: int) -> tuple[device, EfficientNet]:
-    model = efficientnet_v2_s(weights=weights)
-
-    _set_trainable_layers(model, trainable_layers)
-
-    in_features = model.classifier[1].in_features
-    model.classifier[1] = nn.Linear(in_features, num_classes)
+    # get number of input features for the classifier
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    # replace the pre-trained head with a new one
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
 
     device = get_best_device()
     model.to(device)
@@ -385,7 +231,7 @@ def _create_model(num_classes: int, trainable_layers: int) -> tuple[device, Effi
 
 def _load_checkpoint(
     model_save_path: str,
-    model: EfficientNet,
+    model: nn.Module,
     optimizer,
     scheduler,
     *,
@@ -409,10 +255,9 @@ def _load_checkpoint(
 
 def _run_training(
     dev: device,
-    model: EfficientNet,
+    model: nn.Module,
     optimizer,
     scheduler,
-    criterion,
     train_loader: DataLoader,
     validation_loader: DataLoader,
     max_epochs: int,
@@ -424,69 +269,43 @@ def _run_training(
     epochs_without_improvement = 0
     best_checkpoint_data = None
 
-    all_preds_epoch, all_labels_epoch = [], []
-
-    class Timer:
-        """A context manager to time a block of code and print the duration."""
-
-        def __init__(self, description: str):
-            self.description = description
-            self.start_time = None
-
-        def __enter__(self):
-            """Starts the timer when entering the 'with' block."""
-            self.start_time = time.perf_counter()
-
-        def __exit__(self, exc_type, exc_value, traceback):
-            """Stops the timer and prints the elapsed time when exiting the block."""
-            end_time = time.perf_counter()
-            elapsed_ms = (end_time - self.start_time) * 1000
-            logger.debug("'%s' took %s.3f ms", self.description, elapsed_ms)
-
     for epoch in range(start_epoch, max_epochs):
         logger.info("Epoch %d/%d begin...", epoch + 1, max_epochs)
 
-        with Timer("model.train()"):
-            model.train()
+        model.train()
         running_train_loss = 0.0
-        for inputs_raw, labels_raw in tqdm(train_loader, desc=f"Epoch {epoch + 1} Training"):
-            with Timer("inputs, labels = inputs_raw.to(dev), labels_raw.to(dev)"):
-                inputs, labels = inputs_raw.to(dev), labels_raw.to(dev)
+        for images, targets in tqdm(train_loader, desc=f"Epoch {epoch + 1} Training"):
+            images = list(image.to(dev) for image in images)
+            targets = [{k: v.to(dev) for k, v in t.items()} for t in targets]
 
-            with Timer("optimizer.zero_grad()"):
-                optimizer.zero_grad()
-            with Timer("outputs = model(inputs)"):
-                outputs = model(inputs)
-            with Timer("loss = criterion(outputs, labels)"):
-                loss = criterion(outputs, labels)
-            with Timer("loss.backward()"):
-                loss.backward()
-            with Timer("optimizer.step()"):
-                optimizer.step()
+            optimizer.zero_grad()
 
-            running_train_loss += loss.item() * inputs.size(0)
+            loss_dict = model(images, targets)
+            losses = sum(loss for loss in loss_dict.values())
+            losses.backward()
+            optimizer.step()
+
+            running_train_loss += losses.item() * len(images)
 
             if scheduler_mode == SchedulerMode.ONECYCLE:
                 scheduler.step()
 
         epoch_train_loss = running_train_loss / len(train_loader.dataset)
 
-        with Timer("model.eval()"):
-            model.eval()
+        # Validation
+        model.train()
         running_val_loss = 0.0
-        all_preds_epoch, all_labels_epoch = [], []
         with torch.no_grad():
-            for inputs_raw, labels_raw in tqdm(validation_loader, desc=f"Epoch {epoch + 1} Validation"):
-                inputs, labels = inputs_raw.to(dev), labels_raw.to(dev)
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
-                running_val_loss += loss.item() * inputs.size(0)
-                _, preds = torch.max(outputs, 1)
-                all_preds_epoch.extend(preds.cpu().numpy())
-                all_labels_epoch.extend(labels.cpu().numpy())
+            for images, targets in tqdm(validation_loader, desc=f"Epoch {epoch + 1} Validation"):
+                images = list(image.to(dev) for image in images)
+                targets = [{k: v.to(dev) for k, v in t.items()} for t in targets]
+
+                loss_dict = model(images, targets)
+                losses = sum(loss for loss in loss_dict.values())
+                running_val_loss += losses.item() * len(images)
+        model.eval()
 
         epoch_val_loss = running_val_loss / len(validation_loader.dataset)
-        accuracy = accuracy_score(all_labels_epoch, all_preds_epoch)
 
         if scheduler_mode == SchedulerMode.PLATEAU:
             scheduler.step(epoch_val_loss)
@@ -496,12 +315,11 @@ def _run_training(
         current_lr = scheduler.get_last_lr()[0]
 
         logger.info(
-            "Epoch %d/%d -> " "Train Loss: %.4f, " "Val Loss: %.4f, " "Val Accuracy: %.4f, " "LR: %.6f",
+            "Epoch %d/%d -> Train Loss: %.4f, Val Loss: %.4f, LR: %.6f",
             epoch + 1,
             max_epochs,
             epoch_train_loss,
             epoch_val_loss,
-            accuracy,
             current_lr,
         )
 
@@ -523,7 +341,11 @@ def _run_training(
             logger.info("\nEarly stopping triggered after %d epochs with no improvement.", patience)
             break
 
-    return all_labels_epoch, all_preds_epoch, best_checkpoint_data
+    return [], [], best_checkpoint_data
+
+
+def collate_fn(batch):
+    return tuple(zip(*batch))
 
 
 def train_model(
@@ -536,10 +358,8 @@ def train_model(
     loader_workers: int = 8,
     batch_size: int = 128,
     scheduler_mode: SchedulerMode = SchedulerMode.COSINE_ANNEALING,
-    trainable_layers: int = 3,
     augmentation_strength: float = 1.0,
     *,
-    find_lr: bool = False,
     restart_scheduler: bool = False,
 ):
     """Loads data, fine-tunes a pretrained model, and trains with early stopping."""
@@ -549,13 +369,12 @@ def train_model(
         output_dir = "."
     output_dir = os.path.abspath(os.path.expanduser(output_dir))
     os.makedirs(output_dir, exist_ok=True)
-    cache_dir = Path(output_dir) / "preprocessed_cache"
 
     class_names = base_dataset.classes
-    num_classes = len(class_names)
-    logger.info("Found %d images in %d classes: %s", len(base_dataset), num_classes, sorted(class_names))
+    num_classes = len(class_names) + 1  # Add 1 for background
+    logger.info("Found %d images in %d classes: %s", len(base_dataset), len(class_names), sorted(class_names))
 
-    dev, model = _create_model(num_classes, trainable_layers)
+    dev, model = _create_model(num_classes)
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     logger.info("Using device: %s", dev)
 
@@ -566,28 +385,24 @@ def train_model(
         logger.error("Validation set is empty. Check your data distribution or split ratio. Aborting.")
         return
 
-    class_weights = _calculate_class_weights(train_subset, num_classes).to(dev)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
-
-    preprocess_transform, train_augment_transform, val_transform = get_transforms(augmentation_strength)
-
-    train_pil_dataset = CachingPilDataset(train_subset, cache_dir / "train", preprocess_transform)
-    train_dataset = DatasetTransformer(train_pil_dataset, train_augment_transform)
-
-    val_dataset = CachingTensorDataset(val_subset, cache_dir / "val", val_transform)
-
-    if find_lr:
-        train_loader = DataLoader(
-            train_dataset, batch_size=batch_size, shuffle=True, num_workers=loader_workers, pin_memory=True
-        )
-        _run_lr_finder(model, optimizer, criterion, dev, train_loader)
-        return
+    train_dataset = DatasetTransformer(train_subset, get_object_detection_transforms(train=True))
+    val_dataset = DatasetTransformer(val_subset, get_object_detection_transforms(train=False))
 
     train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, num_workers=loader_workers, pin_memory=True
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=loader_workers,
+        pin_memory=True,
+        collate_fn=collate_fn,
     )
     val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False, num_workers=loader_workers, pin_memory=True
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=loader_workers,
+        pin_memory=True,
+        collate_fn=collate_fn,
     )
 
     logger.info("Training on %d images, validating on %d images.", len(train_dataset), len(val_dataset))
@@ -616,15 +431,11 @@ def train_model(
         model_save_path, model, optimizer, scheduler, restart_scheduler=restart_scheduler
     )
 
-    if start_epoch:
-        _set_trainable_layers(model, trainable_layers)
-
-    all_labels, all_preds, best_checkpoint = _run_training(
+    _, _, best_checkpoint = _run_training(
         dev,
         model,
         optimizer,
         scheduler,
-        criterion,
         train_loader,
         val_loader,
         num_epochs,
@@ -647,13 +458,6 @@ def train_model(
         print("Training did not produce a valid model. Nothing to save.")
         return
 
-    active_labels = sorted(set(all_labels))
-    active_class_names = [class_names[i] for i in active_labels]
-    report = classification_report(
-        all_labels, all_preds, labels=active_labels, target_names=active_class_names, zero_division=0
-    )
-    print(report)
-
     class_names_path = os.path.join(output_dir, "class_names.txt")
     with open(class_names_path, "w") as f:
         f.write("\n".join(class_names))
@@ -665,15 +469,12 @@ def main():
     parser.add_argument("data_dir", type=str, help="Directory containing the classified image folders.")
     parser.add_argument("--learning-rate", "-r", default=1.0e-3, type=float, help="Initial learning rate")
     parser.add_argument("--weight-decay", "-w", default=0.01, type=float, help="Weight decay for the AdamW optimizer.")
-    parser.add_argument(
-        "--find-lr", action="store_true", help="Run the learning rate finder instead of a full training run."
-    )
     parser.add_argument("--output", "-o", help="Directory into which trained model outputs will be written.")
     parser.add_argument(
         "--patience", type=int, default=8, help="Maximum number of epochs without improvement before early exit."
     )
-    parser.add_argument("--batch-size", "-b", default=128, type=int, help="Batch size for training.")
-    parser.add_argument("--epochs", "-e", default=1000, type=int, help="Maximum number of epochs to train.")
+    parser.add_argument("--batch-size", "-b", default=2, type=int, help="Batch size for training.")
+    parser.add_argument("--epochs", "-e", default=100, type=int, help="Maximum number of epochs to train.")
     parser.add_argument(
         "--scheduler-mode",
         choices=["plateau", "onecycle", "cosine_annealing"],
@@ -685,9 +486,6 @@ def main():
         "-R",
         action="store_true",
         help="Do not reload the scheduler/optimizer from the checkpoint.",
-    )
-    parser.add_argument(
-        "--trainable-layers", "-L", default=3, type=int, help="Number of layers to unfreeze for training."
     )
     parser.add_argument(
         "--augmentation-strength",
@@ -711,11 +509,9 @@ def main():
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         batch_size=args.batch_size,
-        find_lr=args.find_lr,
         patience=args.patience,
         scheduler_mode=SchedulerMode.from_string(args.scheduler_mode),
         restart_scheduler=args.restart_scheduler,
-        trainable_layers=args.trainable_layers,
         augmentation_strength=args.augmentation_strength,
     )
 

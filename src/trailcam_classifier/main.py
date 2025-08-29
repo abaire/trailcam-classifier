@@ -14,14 +14,16 @@ from typing import TYPE_CHECKING, Callable
 import torch
 from PIL import Image
 from producer_graph import NO_OUTPUT, Pipeline, standard_node
-from torchvision.models import efficientnet_v2_s
+from torchvision import tv_tensors
+from torchvision.models.detection import fasterrcnn_mobilenet_v3_large_fpn
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 
 from trailcam_classifier.util import (
     MODEL_SAVE_FILENAME,
     find_images,
     get_best_device,
-    get_classification_transforms,
     get_image_datetime,
+    get_object_detection_transforms,
 )
 
 if TYPE_CHECKING:
@@ -40,9 +42,10 @@ class ClassificationConfig:
     omit_confidence: bool = False
     confidence_first: bool = False
     multiclass: bool = False
+    confidence_threshold: float = 0.5
 
 
-def load_classifier(model_path: str, class_names_path: str, logger: Callable[[str], None] = print):
+def load_detector(model_path: str, class_names_path: str, logger: Callable[[str], None] = print):
     """Loads the fine-tuned model and corresponding class names."""
     if not os.path.exists(model_path):
         logger(f"Error: Model file not found at {model_path}")
@@ -53,12 +56,16 @@ def load_classifier(model_path: str, class_names_path: str, logger: Callable[[st
 
     with open(class_names_path) as f:
         class_names = [line.strip() for line in f]
-    num_classes = len(class_names)
+    num_classes = len(class_names) + 1  # Add 1 for background
 
     device = get_best_device()
 
-    model = efficientnet_v2_s(weights=None, num_classes=num_classes)
-    transform = get_classification_transforms()
+    # Create model architecture
+    model = fasterrcnn_mobilenet_v3_large_fpn(weights=None, num_classes=num_classes)
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+
+    transform = get_object_detection_transforms(train=False)
 
     checkpoint = torch.load(model_path, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -66,25 +73,29 @@ def load_classifier(model_path: str, class_names_path: str, logger: Callable[[st
     model.to(device)
     model.eval()
 
-    logger(f"Loaded model and {num_classes} classes. Using device: {device}")
+    logger(f"Loaded model and {len(class_names)} classes. Using device: {device}")
     return model, class_names, device, transform
 
 
-def predict_image(image_path: str, model, device, transform, top_k: int = 1):
+def predict_image(image_path: str, model, device, transform, confidence_threshold: float = 0.5):
     """Opens an image, preprocesses it, and returns the model's prediction."""
     img = Image.open(image_path).convert("RGB")
-
-    img_tensor = transform(img)
-
-    img_tensor.unsqueeze_(0)
+    img = tv_tensors.Image(img)
+    img_tensor, _ = transform(img, None)
     img_tensor = img_tensor.to(device)
 
     with torch.no_grad():
-        output = model(img_tensor)
-        probabilities = torch.nn.functional.softmax(output[0], dim=0)
-        top_confidences, top_indices = torch.topk(probabilities, top_k)
+        prediction = model([img_tensor])
 
-    return top_indices.tolist(), top_confidences.tolist()
+    pred = prediction[0]
+
+    # Filter by confidence threshold
+    keep = pred["scores"] > confidence_threshold
+    boxes = pred["boxes"][keep]
+    labels = pred["labels"][keep]
+    scores = pred["scores"][keep]
+
+    return labels.tolist(), scores.tolist(), boxes.tolist()
 
 
 async def run_classification(config: ClassificationConfig, logger: Callable[[str], None] = print):
@@ -93,9 +104,12 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
     class_names_path = os.path.join(os.path.dirname(model_path), "class_names.txt")
     output_root = os.path.abspath(os.path.expanduser(config.output))
 
-    model, class_names, device, transform = load_classifier(model_path, class_names_path, logger)
+    model, class_names, device, transform = load_detector(model_path, class_names_path, logger)
     if not model:
         return 1
+
+    # Add background class at index 0
+    class_names_with_background = ["background", *class_names]
 
     for name in class_names:
         os.makedirs(os.path.join(output_root, name), exist_ok=True)
@@ -120,14 +134,26 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
 
     def _classify(input_data: tuple[Path, str]) -> tuple[Path, str, list[tuple[str, float]]]:
         image_path, output_filename = input_data
-        num_classes = len(class_names)
-        top_k = 2 if config.multiclass and num_classes > 1 else 1
-        predicted_indices, confidences = predict_image(str(image_path), model, device, transform, top_k=top_k)
+        predicted_indices, confidences, _ = predict_image(
+            str(image_path), model, device, transform, config.confidence_threshold
+        )
 
         if not predicted_indices:
             return NO_OUTPUT
 
-        predictions = [(class_names[index], confidences[i]) for i, index in enumerate(predicted_indices)]
+        # Create a list of (class_name, confidence) tuples
+        predictions = []
+        for i, index in enumerate(predicted_indices):
+            class_name = class_names_with_background[index]
+            if class_name != "background":
+                predictions.append((class_name, confidences[i]))
+
+        # Sort by confidence
+        predictions.sort(key=lambda x: x[1], reverse=True)
+
+        if not predictions:
+            return NO_OUTPUT
+
         return image_path, output_filename, predictions
 
     def _save_output(result: tuple[Path, str, list[tuple[str, float]]]) -> None:
@@ -224,6 +250,12 @@ async def main():
     parser.add_argument("--omit-confidence", action="store_true", help="Do not add model confidence to filenames.")
     parser.add_argument("--confidence-first", "-F", action="store_true", help="Prefix filenames with model confidence.")
     parser.add_argument("--multiclass", action="store_true", help="Add primary and secondary classes to the filename.")
+    parser.add_argument(
+        "--confidence-threshold",
+        type=float,
+        default=0.5,
+        help="Confidence threshold for displaying detections.",
+    )
     args = parser.parse_args()
 
     config = ClassificationConfig(
@@ -235,6 +267,7 @@ async def main():
         omit_confidence=args.omit_confidence,
         confidence_first=args.confidence_first,
         multiclass=args.multiclass,
+        confidence_threshold=args.confidence_threshold,
     )
     return await run_classification(config)
 
