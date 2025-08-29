@@ -11,19 +11,13 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
-import torch
-from PIL import Image
 from producer_graph import NO_OUTPUT, Pipeline, standard_node
-from torchvision import tv_tensors
-from torchvision.models.detection import fasterrcnn_mobilenet_v3_large_fpn
-from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from ultralytics import YOLO
 
 from trailcam_classifier.util import (
     MODEL_SAVE_FILENAME,
     find_images,
-    get_best_device,
     get_image_datetime,
-    get_object_detection_transforms,
 )
 
 if TYPE_CHECKING:
@@ -49,53 +43,36 @@ def load_detector(model_path: str, class_names_path: str, logger: Callable[[str]
     """Loads the fine-tuned model and corresponding class names."""
     if not os.path.exists(model_path):
         logger(f"Error: Model file not found at {model_path}")
-        return None, None, None, None
+        return None, None
     if not os.path.exists(class_names_path):
         logger(f"Error: Class names file not found at {class_names_path}")
-        return None, None, None, None
+        return None, None
 
     with open(class_names_path) as f:
         class_names = [line.strip() for line in f]
-    num_classes = len(class_names) + 1  # Add 1 for background
 
-    device = get_best_device()
-
-    # Create model architecture
-    model = fasterrcnn_mobilenet_v3_large_fpn(weights=None, num_classes=num_classes)
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
-
-    transform = get_object_detection_transforms(train=False)
-
-    checkpoint = torch.load(model_path, map_location=device)
-    model.load_state_dict(checkpoint["model_state_dict"])
-
-    model.to(device)
-    model.eval()
-
-    logger(f"Loaded model and {len(class_names)} classes. Using device: {device}")
-    return model, class_names, device, transform
+    model = YOLO(model_path)
+    logger(f"Loaded model and {len(class_names)} classes.")
+    return model, class_names
 
 
-def predict_image(image_path: str, model, device, transform, confidence_threshold: float = 0.5):
+def predict_image(image_path: str, model: YOLO, confidence_threshold: float = 0.5):
     """Opens an image, preprocesses it, and returns the model's prediction."""
-    img = Image.open(image_path).convert("RGB")
-    img = tv_tensors.Image(img)
-    img_tensor, _ = transform(img, None)
-    img_tensor = img_tensor.to(device)
+    results = model.predict(image_path, verbose=False)
+    result = results[0]
 
-    with torch.no_grad():
-        prediction = model([img_tensor])
+    boxes = result.boxes
+    pred_boxes = []
+    pred_labels = []
+    pred_scores = []
+    for box in boxes:
+        if box.conf[0] > confidence_threshold:
+            class_id = int(box.cls[0])
+            pred_labels.append(class_id)
+            pred_scores.append(float(box.conf[0]))
+            pred_boxes.append([float(coord) for coord in box.xyxy[0]])
 
-    pred = prediction[0]
-
-    # Filter by confidence threshold
-    keep = pred["scores"] > confidence_threshold
-    boxes = pred["boxes"][keep]
-    labels = pred["labels"][keep]
-    scores = pred["scores"][keep]
-
-    return labels.tolist(), scores.tolist(), boxes.tolist()
+    return pred_labels, pred_scores, pred_boxes
 
 
 async def run_classification(config: ClassificationConfig, logger: Callable[[str], None] = print):
@@ -104,12 +81,9 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
     class_names_path = os.path.join(os.path.dirname(model_path), "class_names.txt")
     output_root = os.path.abspath(os.path.expanduser(config.output))
 
-    model, class_names, device, transform = load_detector(model_path, class_names_path, logger)
+    model, class_names = load_detector(model_path, class_names_path, logger)
     if not model:
         return 1
-
-    # Add background class at index 0
-    class_names_with_background = ["background", *class_names]
 
     for name in class_names:
         os.makedirs(os.path.join(output_root, name), exist_ok=True)
@@ -134,9 +108,7 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
 
     def _classify(input_data: tuple[Path, str]) -> tuple[Path, str, list[tuple[str, float]]]:
         image_path, output_filename = input_data
-        predicted_indices, confidences, _ = predict_image(
-            str(image_path), model, device, transform, config.confidence_threshold
-        )
+        predicted_indices, confidences, _ = predict_image(str(image_path), model, config.confidence_threshold)
 
         if not predicted_indices:
             return NO_OUTPUT
@@ -144,9 +116,8 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
         # Create a list of (class_name, confidence) tuples
         predictions = []
         for i, index in enumerate(predicted_indices):
-            class_name = class_names_with_background[index]
-            if class_name != "background":
-                predictions.append((class_name, confidences[i]))
+            class_name = class_names[index]
+            predictions.append((class_name, confidences[i]))
 
         # Sort by confidence
         predictions.sort(key=lambda x: x[1], reverse=True)
@@ -256,6 +227,7 @@ async def main():
         default=0.5,
         help="Confidence threshold for displaying detections.",
     )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output.")
     args = parser.parse_args()
 
     config = ClassificationConfig(

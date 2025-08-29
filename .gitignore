@@ -7,6 +7,10 @@ out/
 
 dist/
 
+runs/
+*.cache
+*.pt
+
 validation_set.txt
 class_names.txt
 split_artifact.json

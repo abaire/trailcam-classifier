@@ -4,18 +4,16 @@ from __future__ import annotations
 # ruff: noqa: S311 Standard pseudo-random generators are not suitable for cryptographic purposes
 import itertools
 import os
-import random
 from datetime import datetime
 from pathlib import Path
 
 import torch
 from PIL import Image
 from PIL.ExifTags import TAGS
-from torchvision.transforms import v2 as T
 
 DEFAULT_IMAGE_EXTENSIONS = {"jpg", "jpeg"}
 
-MODEL_SAVE_FILENAME = "trailcam_classifier_model.pth"
+MODEL_SAVE_FILENAME = "trailcam_classifier_model.pt"
 
 
 def get_best_device() -> torch.device:
@@ -96,16 +94,3 @@ class CropInfoBar:
 
         crop_box = (0, 0, width, target_height)
         return img.crop(crop_box)
-
-
-def get_object_detection_transforms(train: bool, augmentation_strength: float = 1.0):
-    """
-    Returns a composition of transforms for preprocessing an image for object detection.
-    """
-    transforms = []
-    transforms.append(T.ToDtype(torch.float, scale=True))
-    transforms.append(T.ToPureTensor())
-    if train:
-        transforms.append(T.RandomHorizontalFlip(0.5))
-
-    return T.Compose(transforms)
