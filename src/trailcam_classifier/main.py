@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 from producer_graph import NO_OUTPUT, Pipeline, standard_node
+from tqdm import tqdm
 from ultralytics import YOLO
 
 from trailcam_classifier.util import (
@@ -94,6 +95,8 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
 
     logger(f"\nFound {len(image_paths)} images. Starting classification...")
 
+    pbar = tqdm(total=len(image_paths), desc="Classifying images")
+
     def _calculate_output_filename(image_path: Path) -> tuple[Path, str]:
         filename = os.path.basename(image_path)
         date_taken = get_image_datetime(image_path)
@@ -147,6 +150,7 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
         if config.print_only:
             logger(f"mv '{image_path.name}' '{filename}'")
             logger(json.dumps(json_data, indent=2))
+            pbar.update(1)
             return
 
         base, ext = os.path.splitext(filename)
@@ -165,10 +169,9 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
 
         if config.copy:
             shutil.copy2(image_path, dest_path)
-            logger(f"✅ Copied '{filename}'")
         else:
             shutil.move(image_path, dest_path)
-            logger(f"✅ Moved '{filename}'")
+        pbar.update(1)
 
     producer_graph = [
         standard_node(name="augment_filename", transform=_calculate_output_filename, num_workers=4, max_queue_size=128),
@@ -192,6 +195,7 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
 
     pipeline = Pipeline(producer_graph)
     await pipeline.run(image_paths)
+    pbar.close()
 
     return 0
 
