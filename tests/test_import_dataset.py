@@ -1,14 +1,11 @@
 import json
+import random
+import sys
 from pathlib import Path
 
 import pytest
-
-from PIL import Image
-
-import random
-
-import sys
 import yaml
+from PIL import Image
 
 from trailcam_classifier.import_dataset import (
     _discover_images,
@@ -172,9 +169,7 @@ def test_convert_bbox_to_yolo():
     img_width = 1920
     img_height = 1080
     bbox = {"x1": 480, "y1": 270, "x2": 1440, "y2": 810}
-    x_center_norm, y_center_norm, width_norm, height_norm = convert_bbox_to_yolo(
-        img_width, img_height, bbox
-    )
+    x_center_norm, y_center_norm, width_norm, height_norm = convert_bbox_to_yolo(img_width, img_height, bbox)
     assert x_center_norm == pytest.approx(0.5)
     assert y_center_norm == pytest.approx(0.5)
     assert width_norm == pytest.approx(0.5)

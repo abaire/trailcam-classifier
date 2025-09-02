@@ -5,9 +5,11 @@ from __future__ import annotations
 # ruff: noqa: DTZ007 Naive datetime constructed using `datetime.datetime.strptime()` without %z
 import argparse
 import asyncio
+import json
 import os
 import shutil
 import sys
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
@@ -33,9 +35,6 @@ class ClassificationConfig:
     output: str = "classified_output"
     print_only: bool = False
     copy: bool = False
-    omit_confidence: bool = False
-    confidence_first: bool = False
-    multiclass: bool = False
     confidence_threshold: float = 0.5
 
 
@@ -85,8 +84,7 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
     if not model:
         return 1
 
-    for name in class_names:
-        os.makedirs(os.path.join(output_root, name), exist_ok=True)
+    os.makedirs(output_root, exist_ok=True)
 
     logger(f"Looking for images in dirs {config.dirs}")
     image_paths = find_images(config.dirs, [config.output])
@@ -106,65 +104,71 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
                 filename = f"{timestamp_string}{base}{ext}"
         return image_path, filename
 
-    def _classify(input_data: tuple[Path, str]) -> tuple[Path, str, list[tuple[str, float]]]:
+    def _classify(input_data: tuple[Path, str]):
         image_path, output_filename = input_data
-        predicted_indices, confidences, _ = predict_image(str(image_path), model, config.confidence_threshold)
+        predicted_indices, confidences, bboxes = predict_image(str(image_path), model, config.confidence_threshold)
 
         if not predicted_indices:
             return NO_OUTPUT
 
-        # Create a list of (class_name, confidence) tuples
-        predictions = []
+        # Create a list of (class_name, confidence, bounding_box) tuples
+        detections = []
         for i, index in enumerate(predicted_indices):
             class_name = class_names[index]
-            predictions.append((class_name, confidences[i]))
+            detections.append((class_name, confidences[i], bboxes[i]))
 
-        # Sort by confidence
-        predictions.sort(key=lambda x: x[1], reverse=True)
-
-        if not predictions:
+        if not detections:
             return NO_OUTPUT
 
-        return image_path, output_filename, predictions
+        return image_path, output_filename, detections
 
-    def _save_output(result: tuple[Path, str, list[tuple[str, float]]]) -> None:
-        image_path, output_filename, predictions = result
-        primary_class, primary_confidence = predictions[0]
+    def _save_output(result: tuple[Path, str, list[tuple[str, float, list[float]]]]) -> None:
+        image_path, output_filename, detections = result
+
+        class_counts = {}
+        for class_name, _, _ in detections:
+            class_counts[class_name] = class_counts.get(class_name, 0) + 1
+
+        sorted_class_names = sorted(class_counts.keys())
+
+        rename_suffix = ""
+        for class_name in sorted_class_names:
+            count = class_counts[class_name]
+            rename_suffix += f"__{count}{class_name}"
 
         base, ext = os.path.splitext(output_filename)
-        if not config.omit_confidence:
-            if config.multiclass and len(predictions) > 1:
-                secondary_class, secondary_confidence = predictions[1]
-                confidence_str = (
-                    f"C{round(primary_confidence * 100)}_{primary_class}_"
-                    f"C{round(secondary_confidence * 100)}_{secondary_class}"
-                )
-            else:
-                confidence_str = f"C{round(primary_confidence * 100)}"
+        filename = f"{base}{rename_suffix}{ext}"
 
-            if config.confidence_first:
-                base = f"{confidence_str}_{base}"
-            else:
-                base += f"_{confidence_str}"
-
-        filename = f"{base}{ext}"
-        dest_dir = os.path.join(output_root, primary_class)
-        dest_path = os.path.join(dest_dir, filename)
-
-        counter = 1
-        while os.path.exists(dest_path):
-            filename = f"{base}_{counter}{ext}"
-            dest_path = os.path.join(dest_dir, filename)
-            counter += 1
+        json_data = defaultdict(list)
+        for class_name, _, bbox in detections:
+            x1, y1, x2, y2 = bbox
+            json_data[class_name].append({"x1": x1, "y1": y1, "x2": x2, "y2": y2})
 
         if config.print_only:
-            logger(f"mv '{filename}' to '{primary_class}' (Confidence: {primary_confidence:.2%})")
-        elif config.copy:
+            logger(f"mv '{image_path.name}' '{filename}'")
+            logger(json.dumps(json_data, indent=2))
+            return
+
+        base, ext = os.path.splitext(filename)
+        counter = 1
+        dest_path = os.path.join(output_root, filename)
+        while os.path.exists(dest_path):
+            filename = f"{base}_{counter}{ext}"
+            dest_path = os.path.join(output_root, filename)
+            counter += 1
+
+        json_base, _ = os.path.splitext(filename)
+        json_filename = f"{json_base}.json"
+        json_dest_path = os.path.join(output_root, json_filename)
+        with open(json_dest_path, "w") as f:
+            json.dump(json_data, f, indent=2)
+
+        if config.copy:
             shutil.copy2(image_path, dest_path)
-            logger(f"✅ Copied '{filename}' to '{primary_class}' (Confidence: {primary_confidence:.2%})")
+            logger(f"✅ Copied '{filename}'")
         else:
             shutil.move(image_path, dest_path)
-            logger(f"✅ Moved '{filename}' to '{primary_class}' (Confidence: {primary_confidence:.2%})")
+            logger(f"✅ Moved '{filename}'")
 
     producer_graph = [
         standard_node(name="augment_filename", transform=_calculate_output_filename, num_workers=4, max_queue_size=128),
@@ -218,9 +222,6 @@ async def main():
         "--print-only", action="store_true", help="Print the classification for each file instead of moving them."
     )
     parser.add_argument("--copy", "-c", action="store_true", help="Copy files to outputs instead of moving them.")
-    parser.add_argument("--omit-confidence", action="store_true", help="Do not add model confidence to filenames.")
-    parser.add_argument("--confidence-first", "-F", action="store_true", help="Prefix filenames with model confidence.")
-    parser.add_argument("--multiclass", action="store_true", help="Add primary and secondary classes to the filename.")
     parser.add_argument(
         "--confidence-threshold",
         type=float,
@@ -236,9 +237,6 @@ async def main():
         output=args.output,
         print_only=args.print_only,
         copy=args.copy,
-        omit_confidence=args.omit_confidence,
-        confidence_first=args.confidence_first,
-        multiclass=args.multiclass,
         confidence_threshold=args.confidence_threshold,
     )
     return await run_classification(config)
