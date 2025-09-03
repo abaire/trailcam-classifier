@@ -37,6 +37,7 @@ class ClassificationConfig:
     print_only: bool = False
     copy: bool = False
     confidence_threshold: float = 0.5
+    keep_empty: bool = False
 
 
 def load_detector(model_path: str, class_names_path: str, logger: Callable[[str], None] = print):
@@ -112,6 +113,8 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
         predicted_indices, confidences, bboxes = predict_image(str(image_path), model, config.confidence_threshold)
 
         if not predicted_indices:
+            if config.keep_empty:
+                return image_path, output_filename, None
             pbar.update(1)
             return NO_OUTPUT
 
@@ -122,13 +125,32 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
             detections.append((class_name, confidences[i], bboxes[i]))
 
         if not detections:
+            if config.keep_empty:
+                return image_path, output_filename, None
             pbar.update(1)
             return NO_OUTPUT
 
         return image_path, output_filename, detections
 
-    def _save_output(result: tuple[Path, str, list[tuple[str, float, list[float]]]]) -> None:
+    def _save_output(result: tuple[Path, str, list[tuple[str, float, list[float]]] | None]) -> None:
         image_path, output_filename, detections = result
+
+        if detections is None:
+            # This is an empty image
+            if config.print_only:
+                logger(f"mv '{image_path.name}' '_empty/{output_filename}'")
+                pbar.update(1)
+                return
+
+            empty_dir = os.path.join(output_root, "_empty_")
+            os.makedirs(empty_dir, exist_ok=True)
+            dest_path = os.path.join(empty_dir, output_filename)
+            if config.copy:
+                shutil.copy2(image_path, dest_path)
+            else:
+                shutil.move(image_path, dest_path)
+            pbar.update(1)
+            return
 
         class_counts = {}
         for class_name, _, _ in detections:
@@ -176,7 +198,7 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
         pbar.update(1)
 
     producer_graph = [
-        standard_node(name="augment_filename", transform=_calculate_output_filename, num_workers=4, max_queue_size=128),
+        standard_node(name="augment_filename", transform=_calculate_output_filename, num_workers=2, max_queue_size=128),
         standard_node(
             name="classify",
             transform=_classify,
@@ -231,6 +253,11 @@ async def main():
     )
     parser.add_argument("--copy", "-c", action="store_true", help="Copy files to outputs instead of moving them.")
     parser.add_argument(
+        "--keep-empty",
+        action="store_true",
+        help="Move/copy images with no detections to a special '_empty_' subdirectory.",
+    )
+    parser.add_argument(
         "--confidence-threshold",
         type=float,
         default=0.5,
@@ -246,6 +273,7 @@ async def main():
         print_only=args.print_only,
         copy=args.copy,
         confidence_threshold=args.confidence_threshold,
+        keep_empty=args.keep_empty,
     )
     return await run_classification(config)
 
