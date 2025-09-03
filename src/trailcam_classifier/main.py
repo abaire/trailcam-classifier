@@ -143,9 +143,9 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
         filename = f"{base}{rename_suffix}{ext}"
 
         json_data = defaultdict(list)
-        for class_name, _, bbox in detections:
+        for class_name, confidence, bbox in detections:
             x1, y1, x2, y2 = bbox
-            json_data[class_name].append({"x1": x1, "y1": y1, "x2": x2, "y2": y2})
+            json_data[class_name].append({"x1": x1, "y1": y1, "x2": x2, "y2": y2, "confidence": confidence})
 
         if config.print_only:
             logger(f"mv '{image_path.name}' '{filename}'")
