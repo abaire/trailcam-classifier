@@ -197,6 +197,8 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
     await pipeline.run(image_paths)
     pbar.close()
 
+    print("Completed successfully")
+
     return 0
 
 
