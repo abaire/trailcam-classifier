@@ -112,6 +112,7 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
         predicted_indices, confidences, bboxes = predict_image(str(image_path), model, config.confidence_threshold)
 
         if not predicted_indices:
+            pbar.update(1)
             return NO_OUTPUT
 
         # Create a list of (class_name, confidence, bounding_box) tuples
@@ -121,6 +122,7 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
             detections.append((class_name, confidences[i], bboxes[i]))
 
         if not detections:
+            pbar.update(1)
             return NO_OUTPUT
 
         return image_path, output_filename, detections
@@ -196,6 +198,8 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
     pipeline = Pipeline(producer_graph)
     await pipeline.run(image_paths)
     pbar.close()
+
+    print("Completed successfully")
 
     return 0
 
