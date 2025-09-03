@@ -23,9 +23,11 @@ class AnnotationLabel(QLabel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.metadata = None
+        self.class_colors = {}
 
-    def set_metadata(self, metadata):
+    def set_metadata(self, metadata, class_colors):
         self.metadata = metadata
+        self.class_colors = class_colors
         self.update()
 
     def sizeHint(self):
@@ -67,6 +69,7 @@ class AnnotationLabel(QLabel):
         offset_y = target_rect.y()
 
         for label, bboxes in self.metadata.items():
+            color = self.class_colors.get(label, QColor("yellow"))
             for bbox in bboxes:
                 x1, y1, x2, y2 = bbox["x1"], bbox["y1"], bbox["x2"], bbox["y2"]
 
@@ -76,7 +79,6 @@ class AnnotationLabel(QLabel):
                 scaled_h = (y2 - y1) * scale
 
                 confidence = bbox.get("confidence", 0.0)
-                color = QColor("yellow")
 
                 pen = painter.pen()
                 pen.setColor(QColor("black"))
@@ -118,6 +120,8 @@ class AnnotationLabel(QLabel):
 
 
 class ViewerWindow(QMainWindow):
+    GOLDEN_RATIO_CONJUGATE = 0.618033988749895
+
     def __init__(self, directory: str):
         super().__init__()
         self.setWindowTitle("Trailcam Classifier Viewer")
@@ -126,6 +130,8 @@ class ViewerWindow(QMainWindow):
         self.current_image_index = 0
         self.image_label = AnnotationLabel()
         self.image_label.setAlignment(Qt.AlignCenter)
+        self.class_colors = {}
+        self.next_color_hue = 0.0
         layout = QVBoxLayout()
         layout.addWidget(self.image_label)
         central_widget = QWidget()
@@ -136,7 +142,7 @@ class ViewerWindow(QMainWindow):
     def load_image(self):
         if not self.image_paths:
             self.image_label.setPixmap(QPixmap())
-            self.image_label.set_metadata(None)
+            self.image_label.set_metadata(None, {})
             self.setWindowTitle("Trailcam Classifier Viewer")
             return
 
@@ -151,9 +157,14 @@ class ViewerWindow(QMainWindow):
         if json_path.exists():
             with open(json_path) as f:
                 metadata = json.load(f)
+            for label in metadata:
+                if label not in self.class_colors:
+                    self.next_color_hue += self.GOLDEN_RATIO_CONJUGATE
+                    self.next_color_hue %= 1
+                    self.class_colors[label] = QColor.fromHsvF(self.next_color_hue, 0.7, 0.95)
 
         self.image_label.setPixmap(pixmap)
-        self.image_label.set_metadata(metadata)
+        self.image_label.set_metadata(metadata, self.class_colors)
 
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() == Qt.Key_Right:
