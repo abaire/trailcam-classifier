@@ -7,3 +7,4 @@
 ## Code style
 - Use `hatch fmt` to format code.
 - Assume the reader is an expert Python programmer and omit obvious comments.
+- Use type annotations wherever possible
