@@ -53,7 +53,7 @@ def hash_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def remove_duplicate_images(directory: str, *, dry_run: bool = False):
+def remove_duplicate_images(directory: str, *, dry_run: bool = False, golden_dirs: list[str] | None = None):
     """
     Recursively finds and removes duplicate images in a directory.
 
@@ -61,30 +61,47 @@ def remove_duplicate_images(directory: str, *, dry_run: bool = False):
     """
     if dry_run:
         print("Dry run mode enabled. No files will be deleted.")
-    print(f"Scanning for duplicate images in {directory}...")
-    images = find_images([directory])
-    hashes: dict[tuple[int, str], Path] = {}
-    duplicates_found = 0
 
-    for image_path in sorted(images):
+    hashes: dict[tuple[int, str], Path] = {}
+
+    def _calculate_key(image_path: Path) -> tuple[int, str] | None:
         try:
             file_size = image_path.stat().st_size
             file_hash = hash_file(image_path)
-            key = (file_size, file_hash)
-
-            if key in hashes:
-                if dry_run:
-                    print(f"Duplicate found: {image_path} is a duplicate of {hashes[key]} (would be deleted)")
-                else:
-                    print(f"Duplicate found: {image_path} is a duplicate of {hashes[key]}")
-                    image_path.unlink()
-                duplicates_found += 1
-            else:
-                hashes[key] = image_path
         except FileNotFoundError:
             # This can happen if a file is deleted during the process
             # (e.g. it was a duplicate of another file that was processed earlier)
-            pass
+            return None
+
+        return (file_size, file_hash)
+
+    if golden_dirs:
+        print(f"Scanning golden images in {golden_dirs}...")
+        for image_path in find_images(golden_dirs):
+            key = _calculate_key(image_path)
+            if not key:
+                continue
+            hashes[key] = image_path
+
+    print(f"Scanning for duplicate images in {directory}...")
+    images = find_images([directory])
+    duplicates_found = 0
+
+    for image_path in images:
+        key = _calculate_key(image_path)
+        if not key:
+            continue
+
+        if key in hashes:
+            if dry_run:
+                print(f"Duplicate found: {image_path} is a duplicate of {hashes[key]} (would be deleted)")
+            else:
+                print(f"Duplicate found: {image_path} is a duplicate of {hashes[key]}")
+                image_path.unlink()
+            duplicates_found += 1
+        else:
+            hashes[key] = image_path
+
     if dry_run:
         print(f"Scan complete. Found {duplicates_found} duplicate images that would be removed.")
     else:
@@ -103,6 +120,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Print the files that would be deleted, but do not delete them.",
     )
+    parser.add_argument(
+        "--golden-dir",
+        "-g",
+        nargs="+",
+        help="Directories containing images that must be kept. Duplicate images outside of this directory will be removed.",
+    )
     args = parser.parse_args()
 
-    remove_duplicate_images(args.directory, dry_run=args.dry_run)
+    remove_duplicate_images(args.directory, dry_run=args.dry_run, golden_dirs=args.golden_dir)
