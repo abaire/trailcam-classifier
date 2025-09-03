@@ -25,17 +25,13 @@ dependencies = [
     "Pillow~=11.3.0",
     "tqdm~=4.67.1",
     "producer-graph @ git+https://github.com/abaire/py-producer-graph.git",
-    "PySide6",
-    "pyinstaller",
     "ultralytics",
 ]
 
 [project.scripts]
 trailcamclassify = "trailcam_classifier.main:run"
 trailcamclassify-train = "trailcam_classifier.training:main"
-trailcamclassify-gui = "trailcam_classifier.gui:run_gui"
 trailcamclassify-import-dataset = "trailcam_classifier.import_dataset:main"
-trailcamclassify-viewer = "trailcam_classifier.viewer:main"
 
 [project.urls]
 Documentation = "https://github.com/abaire/trailcam-classifier#readme"
