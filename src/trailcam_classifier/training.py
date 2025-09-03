@@ -16,7 +16,7 @@ def main():
     parser.add_argument("dataset", help="Path to the dataset.yaml file.")
     parser.add_argument("output_dir", help="Directory into which the final model should be saved.")
 
-    parser.add_argument("--epochs", type=int, default=100, help="Number of epochs to train for.")
+    parser.add_argument("--epochs", type=int, default=125, help="Number of epochs to train for.")
 
     parser.add_argument("--model", default="yolo11m.pt", help="The YOLO model to use.")
 
@@ -27,7 +27,7 @@ def main():
 
     model = YOLO(args.model)
 
-    results = model.train(data=args.dataset, epochs=args.epochs, imgsz=640)
+    results = model.train(data=args.dataset, epochs=args.epochs, imgsz=1024)
 
     best_model_path = Path(results.save_dir) / "weights" / "best.pt"
     dest_path = output_dir / MODEL_SAVE_FILENAME
