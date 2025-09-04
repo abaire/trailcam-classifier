@@ -10,14 +10,14 @@ from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from collections.abc import Collection
+
 import yaml
 from PIL import Image
 from tqdm import tqdm
 
 from trailcam_classifier.util import find_images
-
-if TYPE_CHECKING:
-    from collections.abc import Collection
 
 logger = logging.getLogger(__name__)
 
