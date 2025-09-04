@@ -223,4 +223,4 @@ def test_main_update(tmp_path: Path, monkeypatch):
     # Check that the new class was added and old classes are preserved.
     with open(output_dir / "data.yaml") as f:
         data = yaml.safe_load(f)
-        assert data["names"] == {0: "bird", 1: "cat", 2: "dog"}
+        assert data["names"] == {0: "cat", 1: "dog", 2: "bird"}

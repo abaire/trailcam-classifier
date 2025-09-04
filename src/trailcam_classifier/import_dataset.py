@@ -167,25 +167,26 @@ def main():
     output_dir = Path(args.dataset_dir)
     val_split = args.val_split
 
-    # Check for existing classes
+    # Load existing class names, preserving order
     yaml_path = output_dir / "data.yaml"
+    class_names = []
     if yaml_path.exists():
         with open(yaml_path) as f:
             data = yaml.safe_load(f)
-            if "names" in data:
-                # Note that PyYAML may load this as a list or a dict.
-                if isinstance(data["names"], dict):
-                    existing_class_names = set(data["names"].values())
-                else:
-                    existing_class_names = set(data["names"])
-    else:
-        existing_class_names = set()
+            if "names" in data and isinstance(data["names"], dict):
+                # Reconstruct the ordered list from the id -> name mapping
+                class_names = [v for k, v in sorted(data["names"].items())]
 
-    # Find all images and discover classes from their JSON files
-    all_image_paths, new_class_names = _discover_images(args.data_dir)
+    # Discover new classes from the new data
+    all_image_paths, new_class_names_discovered = _discover_images(args.data_dir)
 
-    # Merge class lists
-    class_names = sorted(existing_class_names.union(new_class_names))
+    # Use a set for efficient lookup of existing classes
+    existing_class_names_set = set(class_names)
+
+    # Append new, unique classes to the list, preserving order
+    for new_class in sorted(new_class_names_discovered):
+        if new_class not in existing_class_names_set:
+            class_names.append(new_class)
     class_to_idx = {name: i for i, name in enumerate(class_names)}
 
     # Generate .txt label files from .json files if they don't exist
