@@ -6,15 +6,18 @@ import json
 import logging
 import random
 import sys
-import yaml
 from collections import defaultdict
 from pathlib import Path
-from typing import Collection
+from typing import TYPE_CHECKING
 
+import yaml
 from PIL import Image
 from tqdm import tqdm
 
 from trailcam_classifier.util import find_images
+
+if TYPE_CHECKING:
+    from collections.abc import Collection
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +185,7 @@ def main():
     all_image_paths, new_class_names = _discover_images(args.data_dir)
 
     # Merge class lists
-    class_names = sorted(list(existing_class_names.union(new_class_names)))
+    class_names = sorted(existing_class_names.union(new_class_names))
     class_to_idx = {name: i for i, name in enumerate(class_names)}
 
     # Generate .txt label files from .json files if they don't exist

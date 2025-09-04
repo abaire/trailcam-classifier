@@ -11,7 +11,7 @@ import shutil
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from producer_graph import NO_OUTPUT, Pipeline, standard_node
 from tqdm import tqdm
@@ -24,6 +24,7 @@ from trailcam_classifier.util import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
