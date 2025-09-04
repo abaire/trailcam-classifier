@@ -62,7 +62,13 @@ def load_detector(model_path: str, class_names_path: str, logger: Callable[[str]
 
 def predict_image(image_path: str, model: YOLO, confidence_threshold: float = 0.5):
     """Opens an image, preprocesses it, and returns the model's prediction."""
-    results = model.predict(image_path, verbose=False)
+    try:
+        results = model.predict(image_path, verbose=False, device="cuda")
+    except ValueError:
+        try:
+            results = model.predict(image_path, verbose=False, device="mps")
+        except ValueError:
+            results = model.predict(image_path, verbose=False)
     result = results[0]
 
     boxes = result.boxes
