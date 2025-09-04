@@ -60,15 +60,30 @@ def load_detector(model_path: str, class_names_path: str, logger: Callable[[str]
     return model, class_names
 
 
+_device_name: str | None = None
+
+
 def predict_image(image_path: str, model: YOLO, confidence_threshold: float = 0.5):
     """Opens an image, preprocesses it, and returns the model's prediction."""
-    try:
-        results = model.predict(image_path, verbose=False, device="cuda")
-    except ValueError:
+    global _device_name  # noqa: PLW0603 Using the global statement to update `_device_name` is discouraged
+    if _device_name:
+        results = model.predict(image_path, verbose=False, device=_device_name)
+    else:
         try:
-            results = model.predict(image_path, verbose=False, device="mps")
+            results = model.predict(image_path, verbose=False, device="cuda")
+            _device_name = "cuda"
         except ValueError:
-            results = model.predict(image_path, verbose=False)
+            if sys.platform == "Darwin":
+                device_to_try = "mps"
+            else:
+                device_to_try = "cpu"
+            try:
+                results = model.predict(image_path, verbose=False, device=device_to_try)
+                _device_name = device_to_try
+            except ValueError:
+                _device_name = "cpu"
+                results = model.predict(image_path, verbose=False, device="cpu")
+
     result = results[0]
 
     boxes = result.boxes
@@ -85,7 +100,11 @@ def predict_image(image_path: str, model: YOLO, confidence_threshold: float = 0.
     return pred_labels, pred_scores, pred_boxes
 
 
-async def run_classification(config: ClassificationConfig, logger: Callable[[str], None] = print):
+async def run_classification(
+    config: ClassificationConfig,
+    logger: Callable[[str], None] = print,
+    progress_update: Callable[[str], None] | None = None,
+):
     """Runs the image classification process."""
     model_path = config.model
     class_names_path = os.path.join(os.path.dirname(model_path), "class_names.txt")
@@ -125,6 +144,8 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
             if config.keep_empty:
                 return image_path, output_filename, None
             pbar.update(1)
+            if progress_update:
+                progress_update(image_path)
             return NO_OUTPUT
 
         # Create a list of (class_name, confidence, bounding_box) tuples
@@ -137,6 +158,8 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
             if config.keep_empty:
                 return image_path, output_filename, None
             pbar.update(1)
+            if progress_update:
+                progress_update(image_path)
             return NO_OUTPUT
 
         return image_path, output_filename, detections
@@ -149,6 +172,8 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
             if config.print_only:
                 logger(f"mv '{image_path.name}' '_empty/{output_filename}'")
                 pbar.update(1)
+                if progress_update:
+                    progress_update(image_path)
                 return
 
             empty_dir = os.path.join(output_root, "_empty_")
@@ -159,6 +184,8 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
             else:
                 shutil.move(image_path, dest_path)
             pbar.update(1)
+            if progress_update:
+                progress_update(image_path)
             return
 
         class_counts = {}
@@ -184,6 +211,8 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
             logger(f"mv '{image_path.name}' '{filename}'")
             logger(json.dumps(json_data, indent=2))
             pbar.update(1)
+            if progress_update:
+                progress_update(image_path)
             return
 
         base, ext = os.path.splitext(filename)
@@ -205,6 +234,8 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
         else:
             shutil.move(image_path, dest_path)
         pbar.update(1)
+        if progress_update:
+            progress_update(image_path)
 
     producer_graph = [
         standard_node(name="augment_filename", transform=_calculate_output_filename, num_workers=2, max_queue_size=128),
@@ -230,7 +261,7 @@ async def run_classification(config: ClassificationConfig, logger: Callable[[str
     await pipeline.run(image_paths)
     pbar.close()
 
-    print("Completed successfully")
+    logger("Completed successfully")
 
     return 0
 
