@@ -87,7 +87,7 @@ def remove_duplicate_images(directory: str, *, dry_run: bool = False, golden_dir
     images = find_images([directory])
     duplicates_found = 0
 
-    for image_path in images:
+    for image_path in sorted(images):
         key = _calculate_key(image_path)
         if not key:
             continue

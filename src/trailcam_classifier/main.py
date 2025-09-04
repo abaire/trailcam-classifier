@@ -11,7 +11,10 @@ import shutil
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from producer_graph import NO_OUTPUT, Pipeline, standard_node
 from tqdm import tqdm
