@@ -6,6 +6,7 @@ import json
 import logging
 import random
 import sys
+import yaml
 from collections import defaultdict
 from pathlib import Path
 from typing import Collection
@@ -163,8 +164,25 @@ def main():
     output_dir = Path(args.dataset_dir)
     val_split = args.val_split
 
+    # Check for existing classes
+    yaml_path = output_dir / "data.yaml"
+    if yaml_path.exists():
+        with open(yaml_path) as f:
+            data = yaml.safe_load(f)
+            if "names" in data:
+                # Note that PyYAML may load this as a list or a dict.
+                if isinstance(data["names"], dict):
+                    existing_class_names = set(data["names"].values())
+                else:
+                    existing_class_names = set(data["names"])
+    else:
+        existing_class_names = set()
+
     # Find all images and discover classes from their JSON files
-    all_image_paths, class_names = _discover_images(args.data_dir)
+    all_image_paths, new_class_names = _discover_images(args.data_dir)
+
+    # Merge class lists
+    class_names = sorted(list(existing_class_names.union(new_class_names)))
     class_to_idx = {name: i for i, name in enumerate(class_names)}
 
     # Generate .txt label files from .json files if they don't exist

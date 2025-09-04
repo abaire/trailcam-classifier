@@ -22,6 +22,7 @@ classifiers = [
 ]
 dependencies = [
     "Pillow~=11.3.0",
+    "PyYAML",
     "tqdm~=4.67.1",
     "producer-graph @ git+https://github.com/abaire/py-producer-graph.git",
     "ultralytics",

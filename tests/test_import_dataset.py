@@ -174,3 +174,53 @@ def test_convert_bbox_to_yolo():
     assert y_center_norm == pytest.approx(0.5)
     assert width_norm == pytest.approx(0.5)
     assert height_norm == pytest.approx(0.5)
+
+
+def test_main_update(tmp_path: Path, monkeypatch):
+    # Create an existing dataset directory
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    # Create an initial data.yaml
+    initial_yaml_path = output_dir / "data.yaml"
+    initial_classes = {0: "cat", 1: "dog"}
+    with open(initial_yaml_path, "w") as f:
+        yaml.dump(
+            {
+                "path": str(output_dir.resolve()),
+                "train": "train",
+                "val": "val",
+                "names": initial_classes,
+            },
+            f,
+        )
+
+    # Create source directory with new images and a new class
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    for i in range(5):
+        img_path = source_dir / f"img{i}.jpg"
+        img = Image.new("RGB", (100, 100))
+        img.save(img_path)
+        json_path = source_dir / f"img{i}.json"
+        class_name = "bird"
+        json_path.write_text(json.dumps({class_name: [{"x1": 10, "y1": 10, "x2": 20, "y2": 20}]}))
+
+    # Patch sys.argv and run main
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "import_dataset.py",
+            str(source_dir),
+            "--dataset-dir",
+            str(output_dir),
+        ],
+    )
+
+    main()
+
+    # Check that the new class was added and old classes are preserved.
+    with open(output_dir / "data.yaml") as f:
+        data = yaml.safe_load(f)
+        assert data["names"] == {0: "bird", 1: "cat", 2: "dog"}
