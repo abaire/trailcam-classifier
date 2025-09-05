@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Collection
 
+import shutil
+
 import yaml
 from PIL import Image
 from tqdm import tqdm
@@ -50,9 +52,26 @@ def convert_bbox_to_yolo(img_width, img_height, bbox):
     return x_center_norm, y_center_norm, width_norm, height_norm
 
 
+def convert_yolo_to_bbox(img_width, img_height, yolo_bbox):
+    """Converts a bounding box from YOLO format to [x1, y1, x2, y2]."""
+    x_center_norm, y_center_norm, width_norm, height_norm = yolo_bbox
+
+    width = width_norm * img_width
+    height = height_norm * img_height
+    x_center = x_center_norm * img_width
+    y_center = y_center_norm * img_height
+
+    x1 = x_center - width / 2
+    y1 = y_center - height / 2
+    x2 = x_center + width / 2
+    y2 = y_center + height / 2
+
+    return {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+
+
 def _discover_images(data_dirs: list[str]) -> tuple[set[Path], list[str]]:
     all_image_paths = find_images(data_dirs)
-    class_names = set()
+    class_names: set[str] = set()
     for img_path in tqdm(all_image_paths, desc="Discovering classes"):
         json_path = img_path.with_suffix(".json")
         if json_path.exists():
@@ -65,9 +84,7 @@ def _discover_images(data_dirs: list[str]) -> tuple[set[Path], list[str]]:
 
                 class_names.update(data.keys())
 
-    class_names = sorted(class_names)
-
-    return all_image_paths, class_names
+    return all_image_paths, sorted(class_names)
 
 
 def _process_metadata_files(all_image_paths: Collection[Path], class_to_idx: dict[str, int]) -> list[Path]:
@@ -121,11 +138,72 @@ def _group_new_images(new_image_paths: Collection[Path], val_split: float) -> tu
     return new_train_paths, new_val_paths
 
 
+def _extract_dataset(dataset_dir: Path, extract_dir: Path, *, train_only: bool, val_only: bool):
+    """
+    Extracts images and their JSON metadata from a YOLO dataset directory
+    to extract_dir, preserving the directory structure.
+    """
+    yaml_path = dataset_dir / "data.yaml"
+    if not yaml_path.exists():
+        print(f"Error: Could not find 'data.yaml' in '{dataset_dir}'.")
+        sys.exit(1)
+
+    with open(yaml_path) as f:
+        data = yaml.safe_load(f)
+        idx_to_class = data["names"]
+
+    if train_only:
+        subsets = ["train"]
+    elif val_only:
+        subsets = ["val"]
+    else:
+        subsets = ["train", "val"]
+
+    for subset in subsets:
+        image_dir = dataset_dir / subset / "images"
+        label_dir = dataset_dir / subset / "labels"
+
+        if not image_dir.is_dir():
+            continue
+
+        image_paths = find_images([str(image_dir)])
+
+        for img_path in tqdm(image_paths, desc=f"Extracting {subset} set"):
+            label_path = label_dir / img_path.with_suffix(".txt").name
+            if not label_path.exists():
+                continue
+
+            img = Image.open(img_path)
+            annotations = defaultdict(list)
+
+            with open(label_path) as f:
+                for line in f:
+                    parts = line.strip().split()
+                    class_idx = int(parts[0])
+                    yolo_bbox = [float(p) for p in parts[1:]]
+                    class_name = idx_to_class[class_idx]
+                    bbox = convert_yolo_to_bbox(img.width, img.height, yolo_bbox)
+                    annotations[class_name].append(bbox)
+
+            relative_path = img_path.relative_to(dataset_dir)
+            dest_path = extract_dir / relative_path
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+            shutil.copy(img_path, dest_path)
+
+            dest_json_path = dest_path.with_suffix(".json")
+            with open(dest_json_path, "w") as f:
+                json.dump(annotations, f, indent=2)
+
+
 def _move_entries(new_train_paths: set[Path], new_val_paths: set[Path], output_dir: Path):
     train_dir = output_dir / "train"
     val_dir = output_dir / "val"
 
     def _move_dataset(items: set[Path], target_dir: Path):
+        if not items:
+            return
+
         image_dir = target_dir / "images"
         label_dir = target_dir / "labels"
         image_dir.mkdir(parents=True, exist_ok=True)
@@ -144,29 +222,9 @@ def _move_entries(new_train_paths: set[Path], new_val_paths: set[Path], output_d
     _move_dataset(new_val_paths, val_dir)
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="""
-        Prepare a directory of images and JSON annotations for YOLO training.
-
-        This script processes a directory of images and corresponding JSON files and generates
-        a YOLO formatted dataset.
-        """
-    )
-    parser.add_argument(
-        "data_dir",
-        nargs="+",
-        help="Path to a directory containing images and metadata that should be moved to the output dataset.",
-    )
-    parser.add_argument(
-        "--dataset-dir", "-o", default="dataset", help="Directory into which a YOLO dataset should be organized."
-    )
-    parser.add_argument("--val-split", type=float, default=0.2, help="Validation split ratio for new images.")
-    args = parser.parse_args()
-
-    output_dir = Path(args.dataset_dir)
-    val_split = args.val_split
-
+def _import(
+    data_dirs: list[str], output_dir: Path, val_split: float, *, train_only: bool = False, val_only: bool = False
+):
     # Load existing class names, preserving order
     yaml_path = output_dir / "data.yaml"
     class_names = []
@@ -178,7 +236,7 @@ def main():
                 class_names = [v for k, v in sorted(data["names"].items())]
 
     # Discover new classes from the new data
-    all_image_paths, new_class_names_discovered = _discover_images(args.data_dir)
+    all_image_paths, new_class_names_discovered = _discover_images(data_dirs)
 
     # Use a set for efficient lookup of existing classes
     existing_class_names_set = set(class_names)
@@ -192,8 +250,15 @@ def main():
     # Generate .txt label files from .json files if they don't exist
     labeled_image_paths = _process_metadata_files(all_image_paths, class_to_idx)
 
-    random.seed(42)
-    new_train_paths, new_val_paths = _group_new_images(labeled_image_paths, val_split)
+    if train_only:
+        new_train_paths = set(labeled_image_paths)
+        new_val_paths = set()
+    elif val_only:
+        new_train_paths = set()
+        new_val_paths = set(labeled_image_paths)
+    else:
+        random.seed(42)
+        new_train_paths, new_val_paths = _group_new_images(labeled_image_paths, val_split)
 
     _move_entries(new_train_paths, new_val_paths, output_dir)
 
@@ -208,6 +273,63 @@ def main():
             f.write(f"  {i}: {name}\n")
 
     print(f"Dataset successfully prepared at '{output_dir}'")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="""
+        Prepare a directory of images and JSON annotations for YOLO training.
+
+        This script processes a directory of images and corresponding JSON files and generates
+        a YOLO formatted dataset.
+        """
+    )
+    parser.add_argument(
+        "data_dir",
+        nargs="+",
+        help="Path to a directory containing images and metadata that should be moved to the output dataset.",
+    )
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--dataset-dir",
+        "-o",
+        help="Directory into which a YOLO dataset should be organized. (default: dataset)",
+    )
+    mode_group.add_argument("--extract", help="Extract all images and JSON metadata into the specified directory.")
+
+    subset_group = parser.add_mutually_exclusive_group()
+    subset_group.add_argument(
+        "--train-only",
+        action="store_true",
+        help="Force all new images into the training set, or only extract the training set.",
+    )
+    subset_group.add_argument(
+        "--val-only",
+        action="store_true",
+        help="Force all new images into the validation set, or only extract the validation set.",
+    )
+
+    parser.add_argument("--val-split", type=float, default=0.2, help="Validation split ratio for new images.")
+    args = parser.parse_args()
+
+    if args.extract:
+        if any(arg.startswith("--val-split") for arg in sys.argv):
+            parser.error("argument --val-split: not allowed with argument --extract")
+        if len(args.data_dir) != 1:
+            parser.error("argument data_dir: expected one directory for --extract mode")
+        dataset_dir = Path(args.data_dir[0])
+        _extract_dataset(dataset_dir, Path(args.extract), train_only=args.train_only, val_only=args.val_only)
+        print(f"Dataset successfully extracted to '{args.extract}'")
+    else:
+        if (args.train_only or args.val_only) and any(arg.startswith("--val-split") for arg in sys.argv):
+            parser.error("argument --val-split: not allowed with argument --train-only or --val-only")
+
+        if not args.dataset_dir:
+            args.dataset_dir = "dataset"
+
+        _import(
+            args.data_dir, Path(args.dataset_dir), args.val_split, train_only=args.train_only, val_only=args.val_only
+        )
 
 
 if __name__ == "__main__":
