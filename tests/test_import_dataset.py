@@ -13,6 +13,7 @@ from trailcam_classifier.import_dataset import (
     _move_entries,
     _process_metadata_files,
     convert_bbox_to_yolo,
+    convert_yolo_to_bbox,
     main,
 )
 
@@ -174,6 +175,58 @@ def test_convert_bbox_to_yolo():
     assert y_center_norm == pytest.approx(0.5)
     assert width_norm == pytest.approx(0.5)
     assert height_norm == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(("img_width", "img_height"), [(120, 80)])
+def test_convert_yolo_to_bbox(img_width, img_height):
+    bbox = {"x1": 10, "y1": 20, "x2": 50, "y2": 60}
+    yolo_bbox = convert_bbox_to_yolo(img_width, img_height, bbox)
+    result_bbox = convert_yolo_to_bbox(img_width, img_height, yolo_bbox)
+
+    assert result_bbox["x1"] == pytest.approx(bbox["x1"])
+    assert result_bbox["y1"] == pytest.approx(bbox["y1"])
+    assert result_bbox["x2"] == pytest.approx(bbox["x2"])
+    assert result_bbox["y2"] == pytest.approx(bbox["y2"])
+
+
+def test_main_extract(tmp_path: Path, monkeypatch):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    img_path = source_dir / "img1.jpg"
+    img = Image.new("RGB", (100, 200))
+    img.save(img_path)
+    json_path = source_dir / "img1.json"
+    bbox = {"x1": 10, "y1": 20, "x2": 60, "y2": 120}
+    json_path.write_text(json.dumps({"cat": [bbox]}))
+
+    dataset_dir = tmp_path / "dataset"
+
+    monkeypatch.setattr(
+        sys, "argv", ["import_dataset.py", str(source_dir), "--dataset-dir", str(dataset_dir), "--val-split", "0"]
+    )
+    main()
+
+    extract_dir = tmp_path / "extract"
+    monkeypatch.setattr(sys, "argv", ["import_dataset.py", str(dataset_dir), "--extract", str(extract_dir)])
+    main()
+
+    # Due to the logic in _group_new_images, with a single image and val_split=0,
+    # the image will be placed in the 'val' set.
+    extracted_img_path = extract_dir / "val" / "images" / "img1.jpg"
+    extracted_json_path = extract_dir / "val" / "images" / "img1.json"
+    assert extracted_img_path.exists()
+    assert extracted_json_path.exists()
+
+    with open(extracted_json_path) as f:
+        data = json.load(f)
+
+    assert "cat" in data
+    assert len(data["cat"]) == 1
+    extracted_bbox = data["cat"][0]
+    assert extracted_bbox["x1"] == pytest.approx(bbox["x1"])
+    assert extracted_bbox["y1"] == pytest.approx(bbox["y1"])
+    assert extracted_bbox["x2"] == pytest.approx(bbox["x2"])
+    assert extracted_bbox["y2"] == pytest.approx(bbox["y2"])
 
 
 def test_main_update(tmp_path: Path, monkeypatch):
