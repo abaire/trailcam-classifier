@@ -90,12 +90,13 @@ def predict_image(image_path: str, model: YOLO, confidence_threshold: float = 0.
     pred_boxes = []
     pred_labels = []
     pred_scores = []
-    for box in boxes:
-        if box.conf[0] > confidence_threshold:
-            class_id = int(box.cls[0])
-            pred_labels.append(class_id)
-            pred_scores.append(float(box.conf[0]))
-            pred_boxes.append([float(coord) for coord in box.xyxy[0]])
+    if boxes:
+        for box in boxes:
+            if box.conf[0] > confidence_threshold:
+                class_id = int(box.cls[0])
+                pred_labels.append(class_id)
+                pred_scores.append(float(box.conf[0]))
+                pred_boxes.append([float(coord) for coord in box.xyxy[0]])
 
     return pred_labels, pred_scores, pred_boxes
 
@@ -126,14 +127,11 @@ async def run_classification(
     logger(f"\nFound {total_images} images. Starting classification...")
 
     pbar = tqdm(total=total_images, desc="Classifying images")
-    hooked_progress_update = progress_update
 
     def update_progress(image_file: Path):
         pbar.update(1)
-        if hooked_progress_update:
-            hooked_progress_update(str(image_file), total_images)
-
-    progress_update = update_progress
+        if progress_update:
+            progress_update(str(image_file), total_images)
 
     def _calculate_output_filename(image_path: Path) -> tuple[Path, str]:
         filename = os.path.basename(image_path)
@@ -152,7 +150,7 @@ async def run_classification(
         if not predicted_indices:
             if config.keep_empty:
                 return image_path, output_filename, None
-            progress_update(image_path)
+            update_progress(image_path)
             return NO_OUTPUT
 
         # Create a list of (class_name, confidence, bounding_box) tuples
@@ -164,7 +162,7 @@ async def run_classification(
         if not detections:
             if config.keep_empty:
                 return image_path, output_filename, None
-            progress_update(image_path)
+            update_progress(image_path)
             return NO_OUTPUT
 
         return image_path, output_filename, detections
@@ -176,7 +174,7 @@ async def run_classification(
             # This is an empty image
             if config.print_only:
                 logger(f"mv '{image_path.name}' '_empty/{output_filename}'")
-                progress_update(image_path)
+                update_progress(image_path)
                 return
 
             empty_dir = os.path.join(output_root, "_empty_")
@@ -186,10 +184,10 @@ async def run_classification(
                 shutil.copy2(image_path, dest_path)
             else:
                 shutil.move(image_path, dest_path)
-            progress_update(image_path)
+            update_progress(image_path)
             return
 
-        class_counts = {}
+        class_counts: dict[str, int] = {}
         for class_name, _, _ in detections:
             class_counts[class_name] = class_counts.get(class_name, 0) + 1
 
@@ -211,7 +209,7 @@ async def run_classification(
         if config.print_only:
             logger(f"mv '{image_path.name}' '{filename}'")
             logger(json.dumps(json_data, indent=2))
-            progress_update(image_path)
+            update_progress(image_path)
             return
 
         base, ext = os.path.splitext(filename)
@@ -232,7 +230,7 @@ async def run_classification(
             shutil.copy2(image_path, dest_path)
         else:
             shutil.move(image_path, dest_path)
-        progress_update(image_path)
+        update_progress(image_path)
 
     producer_graph = [
         standard_node(name="augment_filename", transform=_calculate_output_filename, num_workers=2, max_queue_size=128),
