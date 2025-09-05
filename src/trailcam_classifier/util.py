@@ -28,9 +28,9 @@ def find_images(
     if not extensions:
         extensions = DEFAULT_IMAGE_EXTENSIONS
 
-    input_dirs = [Path(os.path.expanduser(input_dir)) for input_dir in input_dirs]
+    resolved_input_dirs = [Path(os.path.expanduser(input_dir)) for input_dir in input_dirs]
 
-    combined_results = itertools.chain.from_iterable(base_path.rglob("*.*") for base_path in input_dirs)
+    combined_results = itertools.chain.from_iterable(base_path.rglob("*.*") for base_path in resolved_input_dirs)
     all_files = set(combined_results)
 
     if ignore_dirs is None:

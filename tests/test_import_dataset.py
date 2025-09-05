@@ -229,6 +229,81 @@ def test_main_extract(tmp_path: Path, monkeypatch):
     assert extracted_bbox["y2"] == pytest.approx(bbox["y2"])
 
 
+def test_main_import_train_only(tmp_path: Path, monkeypatch):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    img_path = source_dir / "img1.jpg"
+    Image.new("RGB", (10, 10)).save(img_path)
+    (source_dir / "img1.json").write_text(json.dumps({"cat": []}))
+
+    dataset_dir = tmp_path / "dataset"
+    monkeypatch.setattr(
+        sys, "argv", ["import_dataset.py", str(source_dir), "--dataset-dir", str(dataset_dir), "--train-only"]
+    )
+    main()
+
+    assert (dataset_dir / "train" / "images" / "img1.jpg").exists()
+    assert not (dataset_dir / "val" / "images").exists()
+
+
+def test_main_import_val_only(tmp_path: Path, monkeypatch):
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    img_path = source_dir / "img1.jpg"
+    Image.new("RGB", (10, 10)).save(img_path)
+    (source_dir / "img1.json").write_text(json.dumps({"cat": []}))
+
+    dataset_dir = tmp_path / "dataset"
+    monkeypatch.setattr(
+        sys, "argv", ["import_dataset.py", str(source_dir), "--dataset-dir", str(dataset_dir), "--val-only"]
+    )
+    main()
+
+    assert (dataset_dir / "val" / "images" / "img1.jpg").exists()
+    assert not (dataset_dir / "train" / "images").exists()
+
+
+def test_main_extract_subset(tmp_path: Path, monkeypatch):
+    # Create a source dataset with enough images to ensure both train and val sets are created
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    for i in range(3):
+        img_path = source_dir / f"cat{i}.jpg"
+        Image.new("RGB", (10, 10)).save(img_path)
+        (source_dir / f"cat{i}.json").write_text(json.dumps({"cat": []}))
+    img_path = source_dir / "dog1.jpg"
+    Image.new("RGB", (10, 10)).save(img_path)
+    (source_dir / "dog1.json").write_text(json.dumps({"dog": []}))
+
+    dataset_dir = tmp_path / "dataset"
+    # Use a val_split to create both train and val sets.
+    # cat: 3 images -> 1 val, 2 train
+    # dog: 1 image -> 1 val
+    # Total: train=2, val=2
+    monkeypatch.setattr(
+        sys, "argv", ["import_dataset.py", str(source_dir), "--dataset-dir", str(dataset_dir), "--val-split", "0.5"]
+    )
+    main()
+
+    # Test --train-only extraction
+    extract_train_dir = tmp_path / "extract_train"
+    monkeypatch.setattr(
+        sys, "argv", ["import_dataset.py", str(dataset_dir), "--extract", str(extract_train_dir), "--train-only"]
+    )
+    main()
+    assert (extract_train_dir / "train").exists()
+    assert not (extract_train_dir / "val").exists()
+
+    # Test --val-only extraction
+    extract_val_dir = tmp_path / "extract_val"
+    monkeypatch.setattr(
+        sys, "argv", ["import_dataset.py", str(dataset_dir), "--extract", str(extract_val_dir), "--val-only"]
+    )
+    main()
+    assert not (extract_val_dir / "train").exists()
+    assert (extract_val_dir / "val").exists()
+
+
 def test_main_update(tmp_path: Path, monkeypatch):
     # Create an existing dataset directory
     output_dir = tmp_path / "output"

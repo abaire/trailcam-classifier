@@ -71,7 +71,7 @@ def convert_yolo_to_bbox(img_width, img_height, yolo_bbox):
 
 def _discover_images(data_dirs: list[str]) -> tuple[set[Path], list[str]]:
     all_image_paths = find_images(data_dirs)
-    class_names = set()
+    class_names: set[str] = set()
     for img_path in tqdm(all_image_paths, desc="Discovering classes"):
         json_path = img_path.with_suffix(".json")
         if json_path.exists():
@@ -84,9 +84,7 @@ def _discover_images(data_dirs: list[str]) -> tuple[set[Path], list[str]]:
 
                 class_names.update(data.keys())
 
-    class_names = sorted(class_names)
-
-    return all_image_paths, class_names
+    return all_image_paths, sorted(class_names)
 
 
 def _process_metadata_files(all_image_paths: Collection[Path], class_to_idx: dict[str, int]) -> list[Path]:
@@ -140,7 +138,7 @@ def _group_new_images(new_image_paths: Collection[Path], val_split: float) -> tu
     return new_train_paths, new_val_paths
 
 
-def _extract_dataset(dataset_dir: Path, extract_dir: Path):
+def _extract_dataset(dataset_dir: Path, extract_dir: Path, *, train_only: bool, val_only: bool):
     """
     Extracts images and their JSON metadata from a YOLO dataset directory
     to extract_dir, preserving the directory structure.
@@ -154,7 +152,14 @@ def _extract_dataset(dataset_dir: Path, extract_dir: Path):
         data = yaml.safe_load(f)
         idx_to_class = data["names"]
 
-    for subset in ["train", "val"]:
+    if train_only:
+        subsets = ["train"]
+    elif val_only:
+        subsets = ["val"]
+    else:
+        subsets = ["train", "val"]
+
+    for subset in subsets:
         image_dir = dataset_dir / subset / "images"
         label_dir = dataset_dir / subset / "labels"
 
@@ -196,6 +201,9 @@ def _move_entries(new_train_paths: set[Path], new_val_paths: set[Path], output_d
     val_dir = output_dir / "val"
 
     def _move_dataset(items: set[Path], target_dir: Path):
+        if not items:
+            return
+
         image_dir = target_dir / "images"
         label_dir = target_dir / "labels"
         image_dir.mkdir(parents=True, exist_ok=True)
@@ -212,6 +220,59 @@ def _move_entries(new_train_paths: set[Path], new_val_paths: set[Path], output_d
 
     _move_dataset(new_train_paths, train_dir)
     _move_dataset(new_val_paths, val_dir)
+
+
+def _import(
+    data_dirs: list[str], output_dir: Path, val_split: float, *, train_only: bool = False, val_only: bool = False
+):
+    # Load existing class names, preserving order
+    yaml_path = output_dir / "data.yaml"
+    class_names = []
+    if yaml_path.exists():
+        with open(yaml_path) as f:
+            data = yaml.safe_load(f)
+            if "names" in data and isinstance(data["names"], dict):
+                # Reconstruct the ordered list from the id -> name mapping
+                class_names = [v for k, v in sorted(data["names"].items())]
+
+    # Discover new classes from the new data
+    all_image_paths, new_class_names_discovered = _discover_images(data_dirs)
+
+    # Use a set for efficient lookup of existing classes
+    existing_class_names_set = set(class_names)
+
+    # Append new, unique classes to the list, preserving order
+    for new_class in sorted(new_class_names_discovered):
+        if new_class not in existing_class_names_set:
+            class_names.append(new_class)
+    class_to_idx = {name: i for i, name in enumerate(class_names)}
+
+    # Generate .txt label files from .json files if they don't exist
+    labeled_image_paths = _process_metadata_files(all_image_paths, class_to_idx)
+
+    if train_only:
+        new_train_paths = set(labeled_image_paths)
+        new_val_paths = set()
+    elif val_only:
+        new_train_paths = set()
+        new_val_paths = set(labeled_image_paths)
+    else:
+        random.seed(42)
+        new_train_paths, new_val_paths = _group_new_images(labeled_image_paths, val_split)
+
+    _move_entries(new_train_paths, new_val_paths, output_dir)
+
+    yaml_path = output_dir / "data.yaml"
+    with open(yaml_path, "w") as f:
+        f.write(f"path: {output_dir.resolve()}\n")
+        f.write("train: train\n")
+        f.write("val: val\n")
+        f.write("\n")
+        f.write("names:\n")
+        for i, name in enumerate(class_names):
+            f.write(f"  {i}: {name}\n")
+
+    print(f"Dataset successfully prepared at '{output_dir}'")
 
 
 def main():
@@ -236,6 +297,18 @@ def main():
     )
     mode_group.add_argument("--extract", help="Extract all images and JSON metadata into the specified directory.")
 
+    subset_group = parser.add_mutually_exclusive_group()
+    subset_group.add_argument(
+        "--train-only",
+        action="store_true",
+        help="Force all new images into the training set, or only extract the training set.",
+    )
+    subset_group.add_argument(
+        "--val-only",
+        action="store_true",
+        help="Force all new images into the validation set, or only extract the validation set.",
+    )
+
     parser.add_argument("--val-split", type=float, default=0.2, help="Validation split ratio for new images.")
     args = parser.parse_args()
 
@@ -245,56 +318,18 @@ def main():
         if len(args.data_dir) != 1:
             parser.error("argument data_dir: expected one directory for --extract mode")
         dataset_dir = Path(args.data_dir[0])
-        _extract_dataset(dataset_dir, Path(args.extract))
+        _extract_dataset(dataset_dir, Path(args.extract), train_only=args.train_only, val_only=args.val_only)
         print(f"Dataset successfully extracted to '{args.extract}'")
     else:
+        if (args.train_only or args.val_only) and any(arg.startswith("--val-split") for arg in sys.argv):
+            parser.error("argument --val-split: not allowed with argument --train-only or --val-only")
+
         if not args.dataset_dir:
             args.dataset_dir = "dataset"
 
-        output_dir = Path(args.dataset_dir)
-        val_split = args.val_split
-
-        # Load existing class names, preserving order
-        yaml_path = output_dir / "data.yaml"
-        class_names = []
-        if yaml_path.exists():
-            with open(yaml_path) as f:
-                data = yaml.safe_load(f)
-                if "names" in data and isinstance(data["names"], dict):
-                    # Reconstruct the ordered list from the id -> name mapping
-                    class_names = [v for k, v in sorted(data["names"].items())]
-
-        # Discover new classes from the new data
-        all_image_paths, new_class_names_discovered = _discover_images(args.data_dir)
-
-        # Use a set for efficient lookup of existing classes
-        existing_class_names_set = set(class_names)
-
-        # Append new, unique classes to the list, preserving order
-        for new_class in sorted(new_class_names_discovered):
-            if new_class not in existing_class_names_set:
-                class_names.append(new_class)
-        class_to_idx = {name: i for i, name in enumerate(class_names)}
-
-        # Generate .txt label files from .json files if they don't exist
-        labeled_image_paths = _process_metadata_files(all_image_paths, class_to_idx)
-
-        random.seed(42)
-        new_train_paths, new_val_paths = _group_new_images(labeled_image_paths, val_split)
-
-        _move_entries(new_train_paths, new_val_paths, output_dir)
-
-        yaml_path = output_dir / "data.yaml"
-        with open(yaml_path, "w") as f:
-            f.write(f"path: {output_dir.resolve()}\n")
-            f.write("train: train\n")
-            f.write("val: val\n")
-            f.write("\n")
-            f.write("names:\n")
-            for i, name in enumerate(class_names):
-                f.write(f"  {i}: {name}\n")
-
-        print(f"Dataset successfully prepared at '{output_dir}'")
+        _import(
+            args.data_dir, Path(args.dataset_dir), args.val_split, train_only=args.train_only, val_only=args.val_only
+        )
 
 
 if __name__ == "__main__":
