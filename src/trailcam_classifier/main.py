@@ -6,16 +6,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import shutil
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
+import cv2
 from producer_graph import NO_OUTPUT, Pipeline, standard_node
 from tqdm import tqdm
 from ultralytics import YOLO
@@ -27,7 +26,10 @@ from trailcam_classifier.util import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -63,26 +65,32 @@ def load_detector(model_path: str, class_names_path: str, logger: Callable[[str]
 _device_name: str | None = None
 
 
-def predict_image(image_path: str, model: YOLO, confidence_threshold: float = 0.5):
+def predict_image(
+    image_path: str, model: YOLO, confidence_threshold: float = 0.5
+) -> tuple[list[Any], list[Any], list[Any]] | None:
     """Opens an image, preprocesses it, and returns the model's prediction."""
     global _device_name  # noqa: PLW0603 Using the global statement to update `_device_name` is discouraged
-    if _device_name:
-        results = model.predict(image_path, verbose=False, device=_device_name)
-    else:
-        try:
-            results = model.predict(image_path, verbose=False, device="cuda")
-            _device_name = "cuda"
-        except ValueError:
-            if sys.platform == "darwin":
-                device_to_try = "mps"
-            else:
-                device_to_try = "cpu"
+    try:
+        if _device_name:
+            results = model.predict(image_path, verbose=False, device=_device_name)
+        else:
             try:
-                results = model.predict(image_path, verbose=False, device=device_to_try)
-                _device_name = device_to_try
+                results = model.predict(image_path, verbose=False, device="cuda")
+                _device_name = "cuda"
             except ValueError:
-                _device_name = "cpu"
-                results = model.predict(image_path, verbose=False, device="cpu")
+                if sys.platform == "darwin":
+                    device_to_try = "mps"
+                else:
+                    device_to_try = "cpu"
+                try:
+                    results = model.predict(image_path, verbose=False, device=device_to_try)
+                    _device_name = device_to_try
+                except ValueError:
+                    _device_name = "cpu"
+                    results = model.predict(image_path, verbose=False, device="cpu")
+    except cv2.error:
+        logger.exception("Failed to process image %s", image_path)
+        return None
 
     result = results[0]
 
@@ -145,7 +153,10 @@ async def run_classification(
 
     def _classify(input_data: tuple[Path, str]):
         image_path, output_filename = input_data
-        predicted_indices, confidences, bboxes = predict_image(str(image_path), model, config.confidence_threshold)
+        prediction = predict_image(str(image_path), model, config.confidence_threshold)
+        if not prediction:
+            return NO_OUTPUT
+        predicted_indices, confidences, bboxes = prediction
 
         if not predicted_indices:
             if config.keep_empty:
@@ -227,9 +238,16 @@ async def run_classification(
             json.dump(json_data, f, indent=2)
 
         if config.copy:
-            shutil.copy2(image_path, dest_path)
+            try:
+                shutil.copy2(image_path, dest_path)
+            except PermissionError:
+                shutil.copy(image_path, dest_path)
         else:
-            shutil.move(image_path, dest_path)
+            try:
+                shutil.move(image_path, dest_path)
+            except PermissionError:
+                shutil.copy(image_path, dest_path)
+                os.unlink(image_path)
         update_progress(image_path)
 
     producer_graph = [

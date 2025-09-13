@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from PIL.ExifTags import TAGS
 
 DEFAULT_IMAGE_EXTENSIONS = {"jpg", "jpeg"}
@@ -44,6 +44,9 @@ def find_images(
         if not filename.is_file():
             return False
 
+        if filename.name.startswith("."):
+            return False
+
         return filename.suffix[1:].lower() in extensions
 
     return {filename for filename in all_files if keep_file(filename)}
@@ -55,7 +58,11 @@ def get_image_datetime(image_path) -> datetime | None:
     returns it as a datetime object. It checks for 'DateTimeOriginal',
     'DateTimeDigitized', and 'DateTime' in that order.
     """
-    image = Image.open(image_path)
+    try:
+        image = Image.open(image_path)
+    except UnidentifiedImageError:
+        return None
+
     exif_data = image.getexif()
 
     if not exif_data:
