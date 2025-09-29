@@ -209,14 +209,23 @@ def _move_entries(new_train_paths: set[Path], new_val_paths: set[Path], output_d
         image_dir.mkdir(parents=True, exist_ok=True)
         label_dir.mkdir(parents=True, exist_ok=True)
 
+        image: Path
         for image in items:
             target_image = image_dir / image.name
 
             label = image.with_suffix(".txt")
             target_label = label_dir / label.name
 
-            image.rename(target_image)
-            label.rename(target_label)
+            try:
+                image.rename(target_image)
+            except OSError:
+                # Fallback on cross device link errors
+                shutil.move(str(image), str(target_image))
+
+            try:
+                label.rename(target_label)
+            except OSError:
+                shutil.move(str(label), str(target_label))
 
     _move_dataset(new_train_paths, train_dir)
     _move_dataset(new_val_paths, val_dir)
