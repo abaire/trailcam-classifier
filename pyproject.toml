@@ -26,12 +26,17 @@ dependencies = [
     "tqdm~=4.67.1",
     "producer-graph @ git+https://github.com/abaire/py-producer-graph.git",
     "ultralytics",
+    "pandas",
+    "seaborn",
+    "scikit-learn",
+    "matplotlib",
 ]
 
 [project.scripts]
 trailcamclassify = "trailcam_classifier.main:run"
 trailcamclassify-train = "trailcam_classifier.training:main"
 trailcamclassify-import-dataset = "trailcam_classifier.import_dataset:main"
+trailcamclassify-confusion-matrix = "trailcam_classifier.confusion_matrix:main"
 
 [project.urls]
 Documentation = "https://github.com/abaire/trailcam-classifier#readme"
