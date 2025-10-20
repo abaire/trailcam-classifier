@@ -27,24 +27,29 @@ def main():
     args = parser.parse_args()
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    model_path = Path(args.model)
-    model = YOLO(model_path)
-    class_names_path = model_path.parent / "class_names.txt"
-    with open(class_names_path) as f:
-        class_names = [line.strip() for line in f.readlines()]
+    model = YOLO(args.model)
+    class_names = list(model.names.values())
 
     with open(args.dataset) as f:
         data_yaml = yaml.safe_load(f)
     dataset_dir = Path(args.dataset).parent
     val_path = dataset_dir / data_yaml["val"]
     val_images = find_images([str(val_path)])
-    class_to_idx = {name: i for i, name in enumerate(class_names)}
     y_true = []
     y_pred = []
+
+    label_dir = val_path.parent / "labels"
     for image_path in tqdm(val_images, desc="Generating predictions"):
-        true_class_name = image_path.parent.name
-        true_class_idx = class_to_idx[true_class_name]
-        y_true.append(true_class_idx)
+        label_path = label_dir / image_path.with_suffix(".txt").name
+        if not label_path.exists():
+            continue
+
+        with open(label_path) as f:
+            lines = f.readlines()
+            if not lines:
+                continue
+            true_class_idx = int(lines[0].split()[0])
+            y_true.append(true_class_idx)
 
         results = model.predict(image_path, verbose=False)
         pred_class_idx = int(results[0].probs.top1)
