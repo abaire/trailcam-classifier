@@ -43,6 +43,16 @@ class ClassificationConfig:
     copy: bool = False
     confidence_threshold: float = 0.5
     keep_empty: bool = False
+    preserve_directories: bool = False
+
+    def __post_init__(self):
+        self.dirs = [os.path.abspath(os.path.expanduser(root)) for root in self.dirs]
+
+    def get_subdirectory(self, image_dir: Path) -> Path:
+        for root in self.dirs:
+            if image_dir.is_relative_to(root):
+                return image_dir.relative_to(root).parent
+        return image_dir.parent
 
 
 def load_detector(model_path: str, class_names_path: str, logger: Callable[[str], None] = print):
@@ -181,6 +191,8 @@ async def run_classification(
     def _save_output(result: tuple[Path, str, list[tuple[str, float, list[float]]] | None]) -> None:
         image_path, output_filename, detections = result
 
+        image_subdirectory = config.get_subdirectory(image_path)
+
         if detections is None:
             # This is an empty image
             if config.print_only:
@@ -188,7 +200,10 @@ async def run_classification(
                 update_progress(image_path)
                 return
 
-            empty_dir = os.path.join(output_root, "_empty_")
+            if config.preserve_directories:
+                empty_dir = os.path.join(output_root, image_subdirectory, "_empty_")
+            else:
+                empty_dir = os.path.join(output_root, "_empty_")
             os.makedirs(empty_dir, exist_ok=True)
             dest_path = os.path.join(empty_dir, output_filename)
             if config.copy:
@@ -225,7 +240,13 @@ async def run_classification(
 
         base, ext = os.path.splitext(filename)
         counter = 1
-        dest_path = os.path.join(output_root, filename)
+        if config.preserve_directories:
+            dest_dir = os.path.join(output_root, image_subdirectory)
+            os.makedirs(dest_dir, exist_ok=True)
+            dest_path = os.path.join(dest_dir, filename)
+        else:
+            dest_path = os.path.join(output_root, filename)
+
         while os.path.exists(dest_path):
             filename = f"{base}_{counter}{ext}"
             dest_path = os.path.join(output_root, filename)
@@ -318,6 +339,9 @@ async def main():
         default=0.5,
         help="Confidence threshold for displaying detections.",
     )
+    parser.add_argument(
+        "--preserve-directories", "-D", action="store_true", help="Copy classified files into subdirectories"
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output.")
     args = parser.parse_args()
 
@@ -329,6 +353,7 @@ async def main():
         copy=args.copy,
         confidence_threshold=args.confidence_threshold,
         keep_empty=args.keep_empty,
+        preserve_directories=args.preserve_directories,
     )
     return await run_classification(config)
 
