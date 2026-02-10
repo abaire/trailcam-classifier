@@ -11,6 +11,9 @@ from ultralytics import YOLO
 from trailcam_classifier.util import MODEL_SAVE_FILENAME
 
 
+# _DEFAULT_MODEL = "yolo11m.pt"
+_DEFAULT_MODEL = "yolo26l.pt"
+
 def main():
     parser = argparse.ArgumentParser(description="Train a YOLO model.")
     parser.add_argument("dataset", help="Path to the dataset.yaml file.")
@@ -18,7 +21,7 @@ def main():
 
     parser.add_argument("--epochs", type=int, default=175, help="Number of epochs to train for.")
 
-    parser.add_argument("--model", default="yolo11m.pt", help="The YOLO model to use.")
+    parser.add_argument("--model", default=_DEFAULT_MODEL, help="The YOLO model to use.")
 
     args = parser.parse_args()
 
