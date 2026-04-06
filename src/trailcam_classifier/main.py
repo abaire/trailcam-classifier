@@ -245,6 +245,7 @@ async def run_classification(
             os.makedirs(dest_dir, exist_ok=True)
             dest_path = os.path.join(dest_dir, filename)
         else:
+            dest_dir = output_root
             dest_path = os.path.join(output_root, filename)
 
         while os.path.exists(dest_path):
@@ -254,7 +255,7 @@ async def run_classification(
 
         json_base, _ = os.path.splitext(filename)
         json_filename = f"{json_base}.json"
-        json_dest_path = os.path.join(output_root, json_filename)
+        json_dest_path = os.path.join(dest_dir, json_filename)
         with open(json_dest_path, "w") as f:
             json.dump(json_data, f, indent=2)
 
