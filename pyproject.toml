@@ -25,7 +25,7 @@ dependencies = [
     "PyYAML",
     "tqdm~=4.67.1",
     "producer-graph @ git+https://github.com/abaire/py-producer-graph.git",
-    "ultralytics~=8.4.13",
+    "ultralytics~=8.4.46",
     "pandas",
     "seaborn",
     "scikit-learn",
