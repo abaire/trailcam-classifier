@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
-from trailcam_classifier.training import save_class_names, train_model
+from trailcam_classifier.training import main, save_class_names, train_model
 from trailcam_classifier.util import MODEL_SAVE_FILENAME
 
 
@@ -110,6 +110,8 @@ def test_train_model_handles_keyboard_interrupt(mock_yolo_cls: MagicMock, datase
     weights_dir.mkdir(parents=True)
     best_pt = weights_dir / "best.pt"
     best_pt.write_text("epoch_2_best_weights")
+    last_pt = weights_dir / "last.pt"
+    last_pt.write_text("epoch_2_last_weights")
 
     callbacks: dict[str, list[Any]] = {}
 
@@ -127,6 +129,7 @@ def test_train_model_handles_keyboard_interrupt(mock_yolo_cls: MagicMock, datase
         trainer_mock.metrics = {"fitness": 0.9}
         trainer_mock.best_fitness = 0.9
         trainer_mock.best = best_pt
+        trainer_mock.last = last_pt
         trainer_mock.save_dir = str(tmp_path / "runs")
         on_fit_epoch_end(trainer_mock)
 
@@ -138,6 +141,108 @@ def test_train_model_handles_keyboard_interrupt(mock_yolo_cls: MagicMock, datase
     train_model(dataset=dataset_yaml, output_dir=output_dir, epochs=10)
 
     dest_model = output_dir / MODEL_SAVE_FILENAME
+    last_model = output_dir / "last.pt"
     assert dest_model.exists()
     assert dest_model.read_text() == "epoch_2_best_weights"
+    assert last_model.exists()
     assert (output_dir / "class_names.txt").exists()
+
+
+@patch("trailcam_classifier.training.YOLO")
+def test_train_model_resume_default(mock_yolo_cls: MagicMock, dataset_yaml: Path, tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    last_pt = output_dir / "last.pt"
+    last_pt.write_text("saved_checkpoint_state")
+
+    mock_model = MagicMock()
+    mock_yolo_cls.return_value = mock_model
+
+    mock_results = MagicMock()
+    mock_results.save_dir = str(tmp_path / "runs")
+    mock_model.train.return_value = mock_results
+
+    train_model(dataset=dataset_yaml, output_dir=output_dir, epochs=200, resume=True)
+
+    mock_yolo_cls.assert_called_once_with(str(last_pt))
+    mock_model.train.assert_called_once_with(
+        data=str(dataset_yaml),
+        epochs=200,
+        batch=16,
+        imgsz=1024,
+        resume=True,
+    )
+
+
+@patch("trailcam_classifier.training.YOLO")
+def test_train_model_resume_custom_path(mock_yolo_cls: MagicMock, dataset_yaml: Path, tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    custom_checkpoint = tmp_path / "custom" / "checkpoint_epoch_50.pt"
+    custom_checkpoint.parent.mkdir(parents=True)
+    custom_checkpoint.write_text("custom_checkpoint_state")
+
+    mock_model = MagicMock()
+    mock_yolo_cls.return_value = mock_model
+
+    mock_results = MagicMock()
+    mock_results.save_dir = str(tmp_path / "runs")
+    mock_model.train.return_value = mock_results
+
+    train_model(dataset=dataset_yaml, output_dir=output_dir, epochs=200, resume=custom_checkpoint)
+
+    mock_yolo_cls.assert_called_once_with(str(custom_checkpoint))
+    mock_model.train.assert_called_once_with(
+        data=str(dataset_yaml),
+        epochs=200,
+        batch=16,
+        imgsz=1024,
+        resume=True,
+    )
+
+
+def test_train_model_resume_not_found(dataset_yaml: Path, tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    with pytest.raises(FileNotFoundError, match="Checkpoint to resume from not found"):
+        train_model(dataset=dataset_yaml, output_dir=output_dir, epochs=200, resume=True)
+
+
+@patch("trailcam_classifier.training.YOLO")
+def test_train_model_custom_batch(mock_yolo_cls: MagicMock, dataset_yaml: Path, tmp_path: Path) -> None:
+    mock_model = MagicMock()
+    mock_yolo_cls.return_value = mock_model
+    output_dir = tmp_path / "output"
+
+    train_model(dataset=dataset_yaml, output_dir=output_dir, epochs=5, batch=32)
+
+    mock_model.train.assert_called_once_with(
+        data=str(dataset_yaml),
+        epochs=5,
+        batch=32,
+        imgsz=1024,
+        resume=False,
+    )
+
+
+@patch("trailcam_classifier.training.train_model")
+def test_main_batch_argument(mock_train_model: MagicMock, dataset_yaml: Path, tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    with patch(
+        "sys.argv",
+        [
+            "train",
+            str(dataset_yaml),
+            str(output_dir),
+            "--batch",
+            "32",
+        ],
+    ):
+        main()
+
+    mock_train_model.assert_called_once_with(
+        dataset=str(dataset_yaml),
+        output_dir=str(output_dir),
+        epochs=175,
+        batch=32,
+        model_name="yolo26x.pt",
+        resume=None,
+    )
