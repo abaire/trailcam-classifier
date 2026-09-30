@@ -4,11 +4,7 @@ from __future__ import annotations
 
 import itertools
 
-# ruff: noqa: T201 `print` found
-# ruff: noqa: PLR2004 Magic value used in comparison
 # ruff: noqa: DTZ007 Naive datetime constructed using `datetime.datetime.strptime()` without %z
-# ruff: noqa: TRY300 Consider moving this statement to an `else` block
-# ruff: noqa: BLE001 Do not catch blind exception: `Exception`
 import os
 import shutil
 from datetime import datetime

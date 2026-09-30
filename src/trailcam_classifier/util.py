@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 # ruff: noqa: DTZ007 Naive datetime constructed using `datetime.datetime.strptime()` without %z
-# ruff: noqa: S311 Standard pseudo-random generators are not suitable for cryptographic purposes
 import itertools
 import os
 from datetime import datetime

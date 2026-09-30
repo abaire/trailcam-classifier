@@ -61,7 +61,7 @@ def main():
                 gt_labels.append(true_class_idx)
                 gt_boxes.append((left, top, right, bottom))
 
-        pred_labels, pred_scores, pred_boxes = predict_image(image_path, model, confidence_threshold=0.0)
+        pred_labels, _pred_scores, pred_boxes = predict_image(image_path, model, confidence_threshold=0.0)
         empty_class_idx = len(model.names)
 
         if not gt_labels:

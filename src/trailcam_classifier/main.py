@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-# ruff: noqa: T201 `print` found
-# ruff: noqa: PLR2004 Magic value used in comparison
-# ruff: noqa: DTZ007 Naive datetime constructed using `datetime.datetime.strptime()` without %z
 import argparse
 import asyncio
 import json

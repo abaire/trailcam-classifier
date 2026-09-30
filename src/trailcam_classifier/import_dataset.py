@@ -278,8 +278,7 @@ def _import(
         f.write("val: val\n")
         f.write("\n")
         f.write("names:\n")
-        for i, name in enumerate(class_names):
-            f.write(f"  {i}: {name}\n")
+        f.writelines(f"  {i}: {name}\n" for i, name in enumerate(class_names))
 
     print(f"Dataset successfully prepared at '{output_dir}'")
 
